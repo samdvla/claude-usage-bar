@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# ccc — Claude usage readout in the terminal, fed by a Claude usage bridge that
+# exposes accurate rate-limit utilization (not local log estimates).
+# Companion to the ccc-bar menu bar app — same data source.
+#
+# Usage:
+#   ccc            one-shot readout, then exit
+#   ccc --watch    live refresh (default every 5s; -w N to change)
+#   ccc --json     print the combined raw data
+#
+# Config: ~/.config/ccc/config  (see config.example)
+#   CCC_BRIDGE_URL, CCC_FEDERATION_TOKEN (admin endpoints), CCC_GLASSES_TOKEN (summary)
+set -euo pipefail
+
+CONFIG="${CCC_CONFIG:-$HOME/.config/ccc/config}"
+[ -f "$CONFIG" ] && . "$CONFIG"
+BRIDGE_URL="${CCC_BRIDGE_URL:-http://127.0.0.1:8787}"
+FED="${CCC_FEDERATION_TOKEN:-}"
+GLA="${CCC_GLASSES_TOKEN:-}"
+
+WATCH=0; INTERVAL=5; JSON=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --watch|-W) WATCH=1 ;;
+    -w) shift; INTERVAL="${1:-5}" ;;
+    --json|--raw) JSON=1 ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "ccc: unknown arg: $1" >&2; exit 2 ;;
+  esac; shift
+done
+
+if [ -t 1 ]; then
+  C_RST=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_GRN=$'\033[32m'; C_YEL=$'\033[33m'; C_RED=$'\033[31m'; C_CYN=$'\033[36m'
+else C_RST=""; C_DIM=""; C_BOLD=""; C_GRN=""; C_YEL=""; C_RED=""; C_CYN=""; fi
+
+afetch() { curl -sS --max-time 8 -H "x-bridge-federation: $FED" "$BRIDGE_URL$1" 2>/dev/null; }
+gfetch() { curl -sS --max-time 8 -H "Authorization: Bearer $GLA" "$BRIDGE_URL$1" 2>/dev/null; }
+
+color_for() { awk -v u="$1" 'BEGIN{ if(u>=0.8)print "R"; else if(u>=0.5)print "Y"; else print "G" }'; }
+colcode() { case "$1" in R) printf '%s' "$C_RED";; Y) printf '%s' "$C_YEL";; *) printf '%s' "$C_GRN";; esac; }
+
+bar() { # $1=fraction  $2=R/Y/G
+  local frac="$1" width=14 filled empty
+  filled=$(awk -v f="$frac" -v w="$width" 'BEGIN{n=int(f*w+0.5); if(n>w)n=w; if(n<0)n=0; print n}')
+  empty=$((width-filled))
+  printf '%s' "$(colcode "$2")"
+  [ "$filled" -gt 0 ] && printf '%0.s█' $(seq 1 "$filled")
+  printf '%s' "$C_DIM"; [ "$empty" -gt 0 ] && printf '%0.s░' $(seq 1 "$empty"); printf '%s' "$C_RST"
+}
+
+ago() { local t="$1" now d; now=$(date +%s)
+  [ -z "$t" ] || [ "$t" = "null" ] || [ "$t" = "0" ] && { echo "—"; return; }
+  d=$((now-t))
+  if   [ "$d" -lt 60 ];   then echo "${d}s ago"
+  elif [ "$d" -lt 3600 ]; then echo "$((d/60))m ago"
+  else echo "$((d/3600))h $(((d%3600)/60))m ago"; fi; }
+countdown() { local t="$1" now d; now=$(date +%s)
+  [ -z "$t" ] || [ "$t" = "null" ] && { echo "—"; return; }
+  d=$((t-now)); [ "$d" -lt 0 ] && { echo "now"; return; }
+  printf "%dh %02dm" "$((d/3600))" "$(((d%3600)/60))"; }
+
+render_bridge() {
+  local accts state glass
+  accts="$(afetch /admin/accounts)"; state="$(afetch /admin/state)"; glass="$(gfetch /glasses/summary)"
+  if [ -z "$accts" ] || [ "$(echo "$accts" | jq -r 'type' 2>/dev/null)" != "array" ]; then
+    echo "${C_RED}ccc: cannot reach bridge admin${C_RST} ($BRIDGE_URL)" >&2; return 1
+  fi
+
+  if [ "$JSON" = "1" ]; then
+    jq -n --argjson a "$accts" --argjson s "${state:-null}" --argjson g "${glass:-null}" \
+      '{accounts:$a, rate_headers:($s.rate_headers // null), paused:($s.paused // null), summary:$g}'
+    return 0
+  fi
+
+  local u7 r7 r5 obs7
+  u7=$(echo "$state"  | jq -r '.rate_headers["anthropic-ratelimit-unified-7d-utilization"] // empty')
+  r7=$(echo "$state"  | jq -r '.rate_headers["anthropic-ratelimit-unified-7d-reset"] // empty')
+  r5=$(echo "$state"  | jq -r '.rate_headers["anthropic-ratelimit-unified-5h-reset"] // empty')
+  obs7=$(echo "$state"| jq -r '.rate_headers._observed_at // empty')
+  local model spend sess abuse
+  model=$(echo "$glass" | jq -r '.model // "?"' 2>/dev/null)
+  spend=$(echo "$glass" | jq -r '.spend_today_usd // "?"' 2>/dev/null)
+  sess=$(echo "$glass"  | jq -r '.sessions_active // 0' 2>/dev/null)
+  abuse=$(echo "$glass" | jq -r '.abuse_flag // false' 2>/dev/null)
+
+  local owner; owner=$(echo "$accts" | jq -r --arg o "$obs7" '
+    [.[] | {label, d:(($o|tonumber? // 0) - (.last_used_at // 0) | if .<0 then -. else . end)}]
+    | min_by(.d).label // "?"')
+
+  echo
+  echo "  ${C_BOLD}${C_CYN}claude usage${C_RST}  ${C_DIM}· $model · via bridge${C_RST}"
+  echo
+  local newest; newest=$(echo "$accts" | jq -r 'max_by(.last_used_at // 0).id')
+  while IFS=$'\t' read -r id label u5 obs5 cd disabled; do
+    [ "$disabled" = "true" ] && continue
+    local c5 mark name; c5=$(color_for "${u5:-0}")
+    [ "$id" = "$newest" ] && mark="${C_CYN}●${C_RST}" || mark=" "
+    name=$(printf "%-4s" "$label")
+    local p5; p5=$(awk -v u="${u5:-0}" 'BEGIN{printf "%d", u*100+0.5}')
+    printf "  %s %s 5h %s %s%3d%%%s   ${C_DIM}%s${C_RST}" \
+      "$mark" "$name" "$(bar "${u5:-0}" "$c5")" "$(colcode "$c5")" "$p5" "$C_RST" "$(ago "$obs5")"
+    [ -n "$cd" ] && [ "$cd" != "0" ] && [ "$cd" != "null" ] && printf "  ${C_RED}cooldown %ss${C_RST}" "$cd"
+    echo
+  done < <(echo "$accts" | jq -r '.[] | [.id,.label,(.util_5h_last//0),(.util_5h_observed_at//0),(.cooldown_remaining_s//0),(.disabled//false)] | @tsv')
+
+  echo
+  if [ -n "$u7" ]; then
+    local c7 p7; c7=$(color_for "$u7"); p7=$(awk -v u="$u7" 'BEGIN{printf "%d",u*100+0.5}')
+    printf "    7d   %s %s%3d%%%s   ${C_DIM}acct-wide · %s · %s${C_RST}\n" \
+      "$(bar "$u7" "$c7")" "$(colcode "$c7")" "$p7" "$C_RST" "$owner" "$(ago "$obs7")"
+  fi
+  printf "  ${C_DIM}5h resets %s · 7d resets %s · sessions %s · today \$%s${C_RST}\n" \
+    "$(countdown "$r5")" "$(countdown "$r7")" "$sess" "$spend"
+  [ "$abuse" = "true" ] && echo "  ${C_RED}${C_BOLD}⚠ abuse flag set on bridge account${C_RST}"
+  echo
+}
+
+render_keychain() {
+  local tok hdrs u5 u7 r5
+  tok=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '(.claudeAiOauth // .).accessToken // empty' 2>/dev/null)
+  if [ -z "$tok" ]; then
+    echo "${C_RED}ccc: no Claude Code login found${C_RST} — open Claude Code, or set CCC_BRIDGE_URL/CCC_FEDERATION_TOKEN in ~/.config/ccc/config" >&2
+    return 1
+  fi
+  hdrs=$(curl -sS -D - -o /dev/null --max-time 20 https://api.anthropic.com/v1/messages \
+    -H "Authorization: Bearer $tok" -H "anthropic-version: 2023-06-01" \
+    -H "anthropic-beta: oauth-2025-04-20" -H "content-type: application/json" \
+    -d '{"model":"claude-haiku-4-5","max_tokens":1,"messages":[{"role":"user","content":"x"}],"system":[{"type":"text","text":"You are Claude Code, Anthropic'\''s official CLI for Claude."}]}' 2>/dev/null)
+  if [ "$JSON" = "1" ]; then echo "$hdrs" | grep -i 'anthropic-ratelimit-unified' | tr -d '\r'; return 0; fi
+  u5=$(echo "$hdrs" | awk -F': ' 'tolower($1)=="anthropic-ratelimit-unified-5h-utilization"{gsub(/\r/,"",$2);print $2}')
+  u7=$(echo "$hdrs" | awk -F': ' 'tolower($1)=="anthropic-ratelimit-unified-7d-utilization"{gsub(/\r/,"",$2);print $2}')
+  r5=$(echo "$hdrs" | awk -F': ' 'tolower($1)=="anthropic-ratelimit-unified-5h-reset"{gsub(/\r/,"",$2);print $2}')
+  if [ -z "$u5" ]; then
+    echo "${C_RED}ccc: couldn't read usage${C_RST} — your Claude Code login may be expired (open Claude Code)" >&2; return 1
+  fi
+  local c5 c7 p5 p7
+  c5=$(color_for "$u5"); c7=$(color_for "$u7")
+  p5=$(awk -v u="$u5" 'BEGIN{printf "%d",u*100+0.5}'); p7=$(awk -v u="$u7" 'BEGIN{printf "%d",u*100+0.5}')
+  echo
+  echo "  ${C_BOLD}${C_CYN}claude usage${C_RST}  ${C_DIM}· via Claude Code${C_RST}"
+  echo
+  printf "  5h  %s %s%3d%%%s\n" "$(bar "$u5" "$c5")" "$(colcode "$c5")" "$p5" "$C_RST"
+  printf "  7d  %s %s%3d%%%s\n" "$(bar "$u7" "$c7")" "$(colcode "$c7")" "$p7" "$C_RST"
+  echo
+  printf "  ${C_DIM}5h resets %s${C_RST}\n" "$(countdown "$r5")"
+  echo
+}
+
+# Bridge mode if a federation token is configured; otherwise Claude Code login.
+render() { if [ -n "$FED" ]; then render_bridge; else render_keychain; fi; }
+
+if [ "$WATCH" = "1" ] && [ "$JSON" != "1" ]; then
+  trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+  tput civis 2>/dev/null || true
+  while true; do clear; render || true
+    printf "  ${C_DIM}refreshing every %ss · ctrl-c to quit${C_RST}\n" "$INTERVAL"; sleep "$INTERVAL"; done
+else render; fi

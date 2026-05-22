@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""ccc-bar — Claude usage in the macOS menu bar.
+
+Two ways to get data, decided automatically:
+
+1. Claude Code login (default, zero setup): if you use Claude Code, the app
+   reads its existing OAuth token from your Keychain and makes one tiny probe
+   call to read Anthropic's real `anthropic-ratelimit-unified-*` headers
+   (5h/7d utilization). Nothing to sign into. Single account.
+
+2. Bridge (advanced): point it at a Claude usage bridge that already stores
+   those headers. Multi-account, and reading it costs zero tokens.
+
+Template terminal icon + active 5h% in the bar; dropdown shows color-coded
+progress bars, the 5h reset countdown, and a Settings submenu. A normal,
+quittable app — reopen via Spotlight/Applications, `open -a "Claude Usage"`,
+or the `ccc` CLI (bridge mode).
+"""
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import rumps
+from AppKit import (NSApplication, NSColor, NSFont, NSFontAttributeName,
+                    NSForegroundColorAttributeName)
+from Foundation import NSMutableAttributedString, NSAttributedString, NSObject
+from PyObjCTools import AppHelper
+
+CONFIG = os.path.expanduser("~/.config/ccc/config")
+ICON = os.path.expanduser("~/.config/ccc/icon.png")
+REFRESH_SECONDS = 120
+HTTP_TIMEOUT = 20
+BAR_WIDTH = 12
+W_REG, W_SEMI = 0.0, 0.3
+
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
+R5_KEY = "anthropic-ratelimit-unified-5h-utilization"
+R7_KEY = "anthropic-ratelimit-unified-7d-utilization"
+RESET5_KEY = "anthropic-ratelimit-unified-5h-reset"
+
+
+# ---------------------------------------------------------------- config io
+def load_config():
+    cfg = {}
+    try:
+        with open(CONFIG) as fp:
+            for line in fp:
+                m = re.match(r'\s*([A-Z_]+)\s*=\s*"?([^"\n]*)"?', line)
+                if m:
+                    cfg[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return cfg
+
+
+def write_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    lines = ["# ccc config — managed by the app. chmod 600."]
+    for k, v in cfg.items():
+        lines.append(f'{k}="{v}"')
+    with open(CONFIG, "w") as fp:
+        fp.write("\n".join(lines) + "\n")
+    os.chmod(CONFIG, 0o600)
+
+
+# ---------------------------------------------------------------- claude code
+def claude_code_creds():
+    """Read the OAuth token Claude Code stored in the login Keychain."""
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=10)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        data = json.loads(out.stdout)
+        return data.get("claudeAiOauth", data)
+    except Exception:
+        return None
+
+
+def probe_rate_headers(access_token):
+    """Claude-Code-shaped probe; returns lowercased response-header dict."""
+    body = json.dumps({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "x"}],
+        "system": [{"type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
+    }).encode()
+    req = urllib.request.Request(ANTHROPIC_MESSAGES, data=body, headers={
+        "Authorization": f"Bearer {access_token}",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+        "content-type": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+        return {k.lower(): v for k, v in r.headers.items()}
+
+
+def _get_json(url, headers):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+        return json.load(r)
+
+
+# ---------------------------------------------------------------- data fetch
+def fetch():
+    """Return {'mode': 'bridge'|'cc', ...} or None if nothing is available."""
+    cfg = load_config()
+
+    # Bridge mode (advanced, multi-account) — preferred when configured.
+    if cfg.get("CCC_BRIDGE_URL") and cfg.get("CCC_FEDERATION_TOKEN"):
+        base, fed = cfg["CCC_BRIDGE_URL"], cfg["CCC_FEDERATION_TOKEN"]
+        try:
+            accounts = _get_json(base + "/admin/accounts", {"x-bridge-federation": fed})
+            state = _get_json(base + "/admin/state", {"x-bridge-federation": fed})
+        except Exception:
+            return {"mode": "bridge", "error": True}
+        return {"mode": "bridge", "accounts": accounts, "state": state}
+
+    # Claude Code login (default) — read the existing token, probe once.
+    creds = claude_code_creds()
+    if creds and creds.get("accessToken"):
+        try:
+            headers = probe_rate_headers(creds["accessToken"])
+        except urllib.error.HTTPError as e:
+            return {"mode": "cc", "error": "expired" if e.code in (401, 403) else True}
+        except Exception:
+            return {"mode": "cc", "error": True}
+        return {"mode": "cc", "rate_headers": headers,
+                "plan": creds.get("subscriptionType")}
+
+    return None
+
+
+# ---------------------------------------------------------------- formatting
+def f(util):
+    try:
+        return float(util)
+    except (TypeError, ValueError):
+        return None
+
+
+def pct(util):
+    u = f(util)
+    return f"{u * 100:.0f}%" if u is not None else "?"
+
+
+def health_color(util):
+    u = f(util) or 0.0
+    if u >= 0.8:
+        return NSColor.systemRedColor()
+    if u >= 0.5:
+        return NSColor.systemOrangeColor()
+    return NSColor.systemGreenColor()
+
+
+def ago(ts):
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return ""
+    if not ts:
+        return ""
+    d = int(time.time()) - ts
+    if d < 60:
+        return f"{d}s"
+    if d < 3600:
+        return f"{d // 60}m"
+    return f"{d // 3600}h"
+
+
+def countdown(ts):
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return "—"
+    d = ts - int(time.time())
+    if d < 0:
+        return "now"
+    return f"{d // 3600}h {(d % 3600) // 60:02d}m"
+
+
+def _seg(text, color, size=12, weight=W_REG):
+    font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+    return NSAttributedString.alloc().initWithString_attributes_(
+        text, {NSFontAttributeName: font, NSForegroundColorAttributeName: color})
+
+
+def bar_row(util, label, age, active):
+    u = f(util) or 0.0
+    filled = max(0, min(BAR_WIDTH, round(u * BAR_WIDTH)))
+    primary = NSColor.labelColor()
+    secondary = NSColor.secondaryLabelColor()
+    dim = NSColor.tertiaryLabelColor()
+    hc = health_color(util)
+    s = NSMutableAttributedString.alloc().init()
+    s.appendAttributedString_(_seg(
+        f"{label:<7}", primary if active else secondary, 12,
+        W_SEMI if active else W_REG))
+    s.appendAttributedString_(_seg("█" * filled, hc))
+    s.appendAttributedString_(_seg("░" * (BAR_WIDTH - filled), dim))
+    s.appendAttributedString_(_seg(f"  {pct(util):>4}", hc, 12, W_SEMI))
+    if age:
+        s.appendAttributedString_(_seg(f"   · {age}", dim, 11))
+    return s
+
+
+def info_row(text):
+    return _seg(text, NSColor.secondaryLabelColor(), 11, W_REG)
+
+
+# ---------------------------------------------------------------- the app
+_APP = None
+
+
+class _MenuDelegate(NSObject):
+    """Refresh the moment the user opens the menu, so it's always current."""
+    def menuWillOpen_(self, menu):
+        if _APP is not None:
+            _APP.refresh(None)
+
+
+class CCCBar(rumps.App):
+    def __init__(self):
+        global _APP
+        icon = ICON if os.path.exists(ICON) else None
+        super().__init__("ccc", title=" …", icon=icon, template=True,
+                         quit_button=None)
+        try:
+            NSApplication.sharedApplication().setActivationPolicy_(1)  # accessory
+        except Exception:
+            pass
+        _APP = self
+        self._refreshing = False
+        self._menu_delegate = _MenuDelegate.alloc().init()
+        self._delegate_attached = False
+        self.timer = rumps.Timer(self.refresh, REFRESH_SECONDS)
+        self.timer.start()
+        self.refresh(None)
+
+    def _attach_open_delegate(self):
+        # Attach once the NSMenu exists, so opening the dropdown triggers a refresh.
+        if self._delegate_attached:
+            return
+        try:
+            self._menu._menu.setDelegate_(self._menu_delegate)
+            self._delegate_attached = True
+        except Exception:
+            pass
+
+    def noop(self, _):
+        pass
+
+    def _attr_item(self, key, attr_string):
+        item = rumps.MenuItem(key, callback=self.noop)
+        item._menuitem.setAttributedTitle_(attr_string)
+        return item
+
+    def _menu_tail(self):
+        settings = rumps.MenuItem("Settings")
+        settings.add(rumps.MenuItem("Bridge settings…", callback=self.bridge_settings))
+        settings.add(rumps.separator)
+        settings.add(rumps.MenuItem("Disconnect bridge", callback=self.disconnect_bridge))
+        return [
+            None,
+            rumps.MenuItem("Refresh now", callback=self.refresh),
+            settings,
+            rumps.MenuItem("Open in Terminal", callback=self.open_terminal),
+            rumps.MenuItem("Quit", callback=rumps.quit_application),
+        ]
+
+    def _show(self, header_rows, reset_ts, subtitle=None):
+        head = "Claude usage" + (f"  ·  {subtitle}" if subtitle else "")
+        items = [self._attr_item("hdr", info_row(head)), None]
+        items += header_rows
+        items.append(None)
+        items.append(self._attr_item("reset5h", info_row(f"5h resets in {countdown(reset_ts)}")))
+        items += self._menu_tail()
+        self.menu.clear()
+        self.menu = items
+        self._attach_open_delegate()
+
+    def _show_message(self, text):
+        items = [self._attr_item("msg", info_row(text))]
+        items += self._menu_tail()
+        self.menu.clear()
+        self.menu = items
+        self._attach_open_delegate()
+
+    def refresh(self, _):
+        # Probe is a network call — run it off the main thread so opening the
+        # menu never blocks. Apply the result back on the main thread.
+        if self._refreshing:
+            return
+        self._refreshing = True
+        threading.Thread(target=self._refresh_worker, daemon=True).start()
+
+    def _refresh_worker(self):
+        try:
+            data = fetch()
+        finally:
+            self._refreshing = False
+        AppHelper.callAfter(self._apply, data)
+
+    def _apply(self, data):
+        if data is None:
+            self.title = " –"
+            self._show_message("No Claude Code login found — open Claude Code, "
+                               "or use Bridge settings.")
+            return
+        if data.get("error"):
+            self.title = " ⚠"
+            if data["mode"] == "bridge":
+                msg = "Bridge unreachable — check Bridge settings"
+            elif data["error"] == "expired":
+                msg = "Claude Code login expired — open Claude Code to refresh"
+            else:
+                msg = "Couldn't read usage — try again shortly"
+            self._show_message(msg)
+            return
+
+        if data["mode"] == "cc":
+            rh = data["rate_headers"]
+            u5, u7 = rh.get(R5_KEY), rh.get(R7_KEY)
+            self.title = " " + pct(u5)
+            plan = (data.get("plan") or "").title()
+            rows = [
+                self._attr_item("c5h", bar_row(u5, "5h", "", True)),
+                self._attr_item("c7d", bar_row(u7, "7d", "", True)),
+            ]
+            self._show(rows, rh.get(RESET5_KEY), subtitle=plan)
+            return
+
+        # bridge mode (multi-account)
+        accounts = [a for a in data["accounts"] if not a.get("disabled")]
+        rh = (data["state"] or {}).get("rate_headers", {}) or {}
+        u7 = rh.get(R7_KEY)
+        obs7 = rh.get("_observed_at")
+        active = max(accounts, key=lambda a: a.get("last_used_at") or 0) if accounts else None
+        try:
+            obs7_i = int(obs7)
+            owner = min(accounts, key=lambda a: abs(obs7_i - (a.get("last_used_at") or 0)))
+        except (TypeError, ValueError):
+            owner = active
+        self.title = " " + (pct(active.get("util_5h_last")) if active else "?")
+        rows = []
+        for i, a in enumerate(accounts):
+            is_active = active and a["id"] == active["id"]
+            rows.append(self._attr_item(
+                f"acct{i}5h",
+                bar_row(a.get("util_5h_last"), f"{a.get('label','?')} 5h",
+                        ago(a.get("util_5h_observed_at")), is_active)))
+            if owner and a["id"] == owner["id"] and u7 is not None:
+                rows.append(self._attr_item(
+                    f"acct{i}7d",
+                    bar_row(u7, f"{a.get('label','?')} 7d", "", is_active)))
+        self._show(rows, rh.get(RESET5_KEY))
+
+    # --------------------------------------------------- menu actions
+    def bridge_settings(self, _):
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        cfg = load_config()
+        fields = [
+            ("CCC_BRIDGE_URL", "Bridge base URL", "e.g. http://127.0.0.1:8787"),
+            ("CCC_GLASSES_TOKEN", "Summary token", "Authorization: Bearer …"),
+            ("CCC_FEDERATION_TOKEN", "Admin token", "x-bridge-federation header"),
+        ]
+        for i, (key, label, hint) in enumerate(fields, 1):
+            win = rumps.Window(
+                title="ccc · Bridge settings",
+                message=f"({i}/{len(fields)}) {label}\n{hint}",
+                default_text=cfg.get(key, ""),
+                ok="Next" if i < len(fields) else "Save", cancel="Cancel",
+                dimensions=(360, 22))
+            resp = win.run()
+            if not resp.clicked:
+                return
+            cfg[key] = resp.text.strip()
+        write_config(cfg)
+        self.refresh(None)
+        rumps.notification("ccc", "Bridge saved", "Reconnected.")
+
+    def disconnect_bridge(self, _):
+        cfg = load_config()
+        for k in ("CCC_BRIDGE_URL", "CCC_GLASSES_TOKEN", "CCC_FEDERATION_TOKEN"):
+            cfg.pop(k, None)
+        write_config(cfg)
+        self.refresh(None)
+        rumps.notification("ccc", "Bridge disconnected",
+                           "Back to your Claude Code login.")
+
+    def open_terminal(self, _):
+        subprocess.Popen(
+            ["osascript", "-e",
+             'tell application "Terminal" to do script "ccc --watch"',
+             "-e", 'tell application "Terminal" to activate'])
+
+
+if __name__ == "__main__":
+    import socket
+    import sys
+    _guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _guard.bind(("127.0.0.1", 49219))
+    except OSError:
+        sys.exit(0)
+    CCCBar().run()
