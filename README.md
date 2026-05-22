@@ -45,7 +45,7 @@ sign-in, no API key, no config.
 ## Install
 
 ```sh
-git clone https://github.com/biker222/claude-usage-bar.git
+git clone https://github.com/samdvla/claude-usage-bar.git
 cd claude-usage-bar
 ./install.sh
 ```
