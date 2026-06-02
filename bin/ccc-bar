@@ -85,7 +85,14 @@ def claude_code_creds():
 
 
 def probe_rate_headers(access_token):
-    """Claude-Code-shaped probe; returns lowercased response-header dict."""
+    """Claude-Code-shaped probe; returns lowercased response-header dict.
+
+    When you're maxed out, Anthropic rejects the probe with HTTP 429 — but that
+    429 response *still carries* the anthropic-ratelimit-unified-* headers, so
+    being at 100% is an answer, not a failure. We read the headers off the error
+    response too. Only auth failures (401/403) re-raise, so the "login expired"
+    path stays intact.
+    """
     body = json.dumps({
         "model": "claude-haiku-4-5",
         "max_tokens": 1,
@@ -99,8 +106,13 @@ def probe_rate_headers(access_token):
         "anthropic-beta": "oauth-2025-04-20",
         "content-type": "application/json",
     })
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
-        return {k.lower(): v for k, v in r.headers.items()}
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+            return {k.lower(): v for k, v in r.headers.items()}
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise
+        return {k.lower(): v for k, v in e.headers.items()}
 
 
 def _get_json(url, headers):
@@ -132,6 +144,10 @@ def fetch():
         except urllib.error.HTTPError as e:
             return {"mode": "cc", "error": "expired" if e.code in (401, 403) else True}
         except Exception:
+            return {"mode": "cc", "error": True}
+        # A 429 (maxed out) returns these headers too; a transient error (e.g.
+        # overload) may not — only treat it as data when the usage is actually there.
+        if R5_KEY not in headers and R7_KEY not in headers:
             return {"mode": "cc", "error": True}
         return {"mode": "cc", "rate_headers": headers,
                 "plan": creds.get("subscriptionType")}
