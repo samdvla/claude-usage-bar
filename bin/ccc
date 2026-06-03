@@ -8,6 +8,7 @@
 #   ccc            one-shot readout, then exit
 #   ccc --watch    live refresh (default every 5s; -w N to change)
 #   ccc --json     print the raw rate-limit headers
+#   ccc open       open the menu bar app (Claude Usage)
 set -euo pipefail
 
 WATCH=0; INTERVAL=5; JSON=0
@@ -16,7 +17,11 @@ while [ $# -gt 0 ]; do
     --watch|-W) WATCH=1 ;;
     -w) shift; INTERVAL="${1:-5}" ;;
     --json|--raw) JSON=1 ;;
-    -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    open) open -a "Claude Usage" 2>/dev/null && exit 0
+      _py="$HOME/.config/ccc/venv/bin/python"; _bar="$HOME/.local/bin/ccc-bar"
+      if [ -x "$_py" ] && [ -f "$_bar" ]; then nohup "$_py" "$_bar" >/dev/null 2>&1 & exit 0; fi
+      echo "ccc: Claude Usage app not found — run ./install.sh first" >&2; exit 1 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "ccc: unknown arg: $1" >&2; exit 2 ;;
   esac; shift
 done

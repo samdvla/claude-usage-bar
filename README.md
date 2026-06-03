@@ -28,9 +28,11 @@ sign-in, no API key, no config.
 - **5h reset countdown.**
 - **Always current** — refreshes the instant you open the menu, plus a light
   background tick every 2 minutes.
-- **`ccc` CLI**: `ccc` (one-shot), `ccc --watch` (live), `ccc --json` (raw headers).
+- **`ccc` CLI**: `ccc` (one-shot), `ccc --watch` (live), `ccc --json` (raw
+  headers), `ccc open` (open the menu bar app).
 - **A normal, quittable app.** Quit and it stays quit. Reopen by tapping
-  **Claude Usage** in Applications/Spotlight, `open -a "Claude Usage"`, or `ccc`.
+  **Claude Usage** in Applications/Spotlight, `open -a "Claude Usage"`, or
+  `ccc open`.
 - **Auto-starts at login** via a LaunchAgent (no forced respawn).
 
 ## Requirements
