@@ -97,4 +97,3 @@ echo
 echo "==> Done. Look for the '>' icon in your menu bar (you may get a one-time"
 echo "    Keychain prompt to allow reading your Claude Code login — click Allow)."
 echo "    Open anytime: tap \"$APP_NAME\" in Applications/Spotlight, or run 'ccc'."
-echo "    No Claude Code? Point it at a usage bridge via Settings… in the menu."

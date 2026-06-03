@@ -17,7 +17,6 @@ sign-in, no API key, no config.
   5h resets in 2h 39m
   ─────────────
   Refresh now
-  Settings        ▸
   Open in Terminal
   Quit
 ```
@@ -33,7 +32,6 @@ sign-in, no API key, no config.
 - **A normal, quittable app.** Quit and it stays quit. Reopen by tapping
   **Claude Usage** in Applications/Spotlight, `open -a "Claude Usage"`, or `ccc`.
 - **Auto-starts at login** via a LaunchAgent (no forced respawn).
-- **Optional bridge mode** for multi-account, zero-token reads (see below).
 
 ## Requirements
 
@@ -65,17 +63,6 @@ token, the same request shape Claude Code itself uses.
 **Cost / fair warning:** each refresh is a real (tiny) API call on your account.
 This app keeps it light (on-open + every 2 min). Cranking the interval way down
 means lots of automated calls — go easy.
-
-## Optional: bridge mode (advanced, multi-account)
-
-If you run a **Claude usage bridge** — a service that proxies Claude traffic and
-stores the rate-limit headers — point the app at it via **Settings ▸ Bridge
-settings…** (or `~/.config/ccc/config`, see `config.example`). Bridge mode shows
-multiple accounts side by side and reads cost **zero tokens** (it serves stored
-headers). It expects:
-
-- `GET /admin/accounts` and `GET /admin/state` — header `x-bridge-federation: <token>`
-- `GET /glasses/summary` — header `Authorization: Bearer <token>`
 
 ## License
 
