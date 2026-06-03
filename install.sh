@@ -62,9 +62,11 @@ PLIST
 touch "$APP"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" 2>/dev/null || true
 
-# 5. LaunchAgent: start at login, runs the app directly (reliable), NO KeepAlive
-#    so it stays quit when you choose Quit. A single-instance guard in the app
-#    keeps a manual tap and the login start from ever double-launching.
+# 5. LaunchAgent: start at login, runs the app directly (reliable). KeepAlive
+#    with SuccessfulExit=false relaunches the app if it ever closes
+#    unexpectedly/crashes, but honors a clean Quit (exit 0) so it stays quit
+#    when you choose Quit. A single-instance guard in the app keeps a manual tap
+#    and the login start from ever double-launching.
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -78,7 +80,7 @@ cat > "$PLIST" <<EOF
         <string>$BIN/ccc-bar</string>
     </array>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><false/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
     <key>ProcessType</key><string>Interactive</string>
     <key>StandardOutPath</key><string>$CFGDIR/cccbar.log</string>
     <key>StandardErrorPath</key><string>$CFGDIR/cccbar.log</string>
