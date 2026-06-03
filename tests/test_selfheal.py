@@ -29,9 +29,28 @@ def test_default_is_on_when_unset():
     d.removeObjectForKey_(m.SELFHEAL_KEY)
     assert m.self_heal_enabled() is True
 
+class _Win: pass
+class _Button:
+    def __init__(self, win): self._w = win
+    def window(self): return self._w
+class _Item:
+    def __init__(self, button): self._b = button
+    def button(self): return self._b
+class _Raises:
+    def button(self): raise RuntimeError("boom")
+
+def test_status_item_alive():
+    m = _load()
+    assert m.status_item_alive(None) is False
+    assert m.status_item_alive(_Item(None)) is False           # no button
+    assert m.status_item_alive(_Item(_Button(None))) is False  # button not in a window
+    assert m.status_item_alive(_Item(_Button(_Win()))) is True # in a window
+    assert m.status_item_alive(_Raises()) is True              # unknown -> assume alive
+
 if __name__ == "__main__":
     test_toggle_roundtrip()
     test_default_is_on_when_unset()
+    test_status_item_alive()
     # leave the real setting ON (its default) so we don't change app behavior
     _load().set_self_heal(True)
     print("OK test_selfheal toggle")
