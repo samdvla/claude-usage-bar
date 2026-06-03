@@ -60,24 +60,6 @@ def set_self_heal(on):
     _defaults().setBool_forKey_(bool(on), SELFHEAL_KEY)
 
 
-def status_item_alive(nsstatusitem):
-    """True if the status item is still in the menu bar.
-
-    The status button detaches from its window when macOS evicts the item, so
-    `button().window() is None` is our 'icon gone' signal. Never raises — if we
-    can't tell, assume alive so we never thrash recreating a healthy item.
-    """
-    try:
-        if nsstatusitem is None:
-            return False
-        button = nsstatusitem.button()
-        if button is None:
-            return False
-        return button.window() is not None
-    except Exception:
-        return True
-
-
 # ---------------------------------------------------------------- claude code
 def claude_code_creds():
     """Read the OAuth token Claude Code stored in the login Keychain."""
