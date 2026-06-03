@@ -21,7 +21,8 @@ import urllib.request
 import rumps
 from AppKit import (NSApplication, NSColor, NSFont, NSFontAttributeName,
                     NSForegroundColorAttributeName)
-from Foundation import NSMutableAttributedString, NSAttributedString, NSObject
+from Foundation import (NSMutableAttributedString, NSAttributedString, NSObject,
+                        NSUserDefaults)
 from PyObjCTools import AppHelper
 
 ICON = os.path.expanduser("~/.config/ccc/icon.png")
@@ -35,6 +36,28 @@ ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
 R5_KEY = "anthropic-ratelimit-unified-5h-utilization"
 R7_KEY = "anthropic-ratelimit-unified-7d-utilization"
 RESET5_KEY = "anthropic-ratelimit-unified-5h-reset"
+
+DEFAULTS_SUITE = "com.claude-usage-bar"
+SELFHEAL_KEY = "selfHeal"
+
+
+# ---------------------------------------------------------------- settings
+def _defaults():
+    # Named suite so the setting is stable regardless of how the app is
+    # launched (LaunchAgent vs the .app launcher both exec the same unbundled
+    # python, which would otherwise get an ambiguous defaults domain).
+    return NSUserDefaults.alloc().initWithSuiteName_(DEFAULTS_SUITE)
+
+
+def self_heal_enabled():
+    d = _defaults()
+    if d.objectForKey_(SELFHEAL_KEY) is None:
+        return True  # default ON
+    return bool(d.boolForKey_(SELFHEAL_KEY))
+
+
+def set_self_heal(on):
+    _defaults().setBool_forKey_(bool(on), SELFHEAL_KEY)
 
 
 # ---------------------------------------------------------------- claude code
