@@ -12,6 +12,9 @@ right-click has Refresh / Auto-start / Open in Terminal / Quit.
 Download `ClaudeUsageBar.exe` (and optionally `ccc.exe`) from Releases and run.
 No .NET install required — the exe is self-contained.
 
+> Not code-signed: SmartScreen may say "Windows protected your PC." Click
+> **More info → Run anyway**.
+
 Right-click the tray icon → **Auto-start at login** to keep it running.
 
 ### Keeping the icon visible on the taskbar

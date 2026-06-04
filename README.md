@@ -77,6 +77,10 @@ nothing to set up on the target machine.
 Download `ClaudeUsageBar.exe` (and optionally `ccc.exe`) from
 [Releases](https://github.com/samdvla/claude-usage-bar/releases) and run.
 
+> The exe isn't code-signed, so Windows SmartScreen may show **"Windows
+> protected your PC."** Click **More info → Run anyway**. (It's a self-contained
+> .NET app — large because it bundles the runtime so nothing else is needed.)
+
 The app pins itself to the always-visible part of the taskbar automatically
 (via the Windows 11 `IsPromoted` flag). If your Windows build keeps it in the
 **"^" overflow**, drag the Claude-orange badge out onto the taskbar once, or
