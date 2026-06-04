@@ -11,10 +11,13 @@ public static class IconRenderer
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr handle);
 
-    // Renders the 5h percent as a clean rounded "badge": a health-colored rounded
-    // square with a subtle vertical gradient and a crisp white number. The color
-    // conveys health at a glance; the number gives the exact value. Rendered at a
-    // high resolution and downscaled by the shell so it stays sharp on any DPI.
+    // Claude brand color (warm coral/orange) for the badge.
+    private static readonly Color ClaudeOrange = Color.FromArgb(0xD9, 0x77, 0x57);
+
+    // Renders the 5h percent as a clean rounded "badge" in Claude's brand orange,
+    // with a subtle vertical gradient and a crisp white number. The badge is the
+    // brand mark; usage detail/health lives in the flyout bars. Rendered at high
+    // resolution and downscaled by the shell so it stays sharp on any DPI.
     public static Icon Render(double? util, bool dark, int size = 64)
     {
         int pct = util is null ? 0 : (int)Math.Round(util.Value * 100);
@@ -23,7 +26,7 @@ public static class IconRenderer
 
         Color baseColor = util is null
             ? Color.FromArgb(120, 120, 128)                      // neutral grey when no login
-            : Theme.Health(Health.Level(util.Value));
+            : ClaudeOrange;
 
         using var bmp = new Bitmap(size, size);
         using (var g = Graphics.FromImage(bmp))
