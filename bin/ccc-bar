@@ -36,6 +36,7 @@ ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
 R5_KEY = "anthropic-ratelimit-unified-5h-utilization"
 R7_KEY = "anthropic-ratelimit-unified-7d-utilization"
 RESET5_KEY = "anthropic-ratelimit-unified-5h-reset"
+RESET7_KEY = "anthropic-ratelimit-unified-7d-reset"
 
 DEFAULTS_SUITE = "com.claude-usage-bar"
 SELFHEAL_KEY = "selfHeal"
@@ -159,6 +160,8 @@ def countdown(ts):
     d = ts - int(time.time())
     if d < 0:
         return "now"
+    if d >= 86400:
+        return f"{d // 86400}d {(d % 86400) // 3600}h"
     return f"{d // 3600}h {(d % 3600) // 60:02d}m"
 
 
@@ -257,12 +260,14 @@ class CCCBar(rumps.App):
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
 
-    def _show(self, header_rows, reset_ts, subtitle=None):
+    def _show(self, header_rows, reset_ts, reset7_ts=None, subtitle=None):
         head = "Claude usage" + (f"  ·  {subtitle}" if subtitle else "")
         items = [self._attr_item("hdr", info_row(head)), None]
         items += header_rows
         items.append(None)
         items.append(self._attr_item("reset5h", info_row(f"5h resets in {countdown(reset_ts)}")))
+        if reset7_ts is not None:
+            items.append(self._attr_item("reset7d", info_row(f"7d resets in {countdown(reset7_ts)}")))
         items += self._menu_tail()
         self.menu.clear()
         self.menu = items
@@ -344,7 +349,7 @@ class CCCBar(rumps.App):
                 self._attr_item("c5h", bar_row(u5, "5h", "", True)),
                 self._attr_item("c7d", bar_row(u7, "7d", "", True)),
             ]
-            self._show(rows, rh.get(RESET5_KEY), subtitle=plan)
+            self._show(rows, rh.get(RESET5_KEY), rh.get(RESET7_KEY), subtitle=plan)
 
     # --------------------------------------------------- menu actions
     def toggle_self_heal(self, sender):
