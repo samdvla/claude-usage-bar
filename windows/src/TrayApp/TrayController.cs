@@ -45,8 +45,18 @@ public sealed class TrayController : IDisposable
         _timer.Tick += (_, _) => Refresh();
         _timer.Start();
 
-        Refresh();
-        PromoteToTaskbar();
+        // Defer the first probe + taskbar promotion until the message loop is
+        // running, so the async Refresh continuation resumes on the WinForms UI
+        // thread (no SynchronizationContext exists yet during construction).
+        var init = new System.Windows.Forms.Timer { Interval = 1 };
+        init.Tick += (_, _) =>
+        {
+            init.Stop();
+            init.Dispose();
+            PromoteToTaskbar();
+            Refresh();
+        };
+        init.Start();
     }
 
     // Windows 11 keeps newly-added tray icons in the "^" overflow until the user
@@ -106,11 +116,18 @@ public sealed class TrayController : IDisposable
         return f;
     }
 
+    private bool _refreshing;
+
     private async void Refresh()
     {
+        // All Refresh calls happen on the UI thread, so this guard is enough to
+        // stop overlapping probes (timer + manual + flyout-open) from piling up.
+        if (_refreshing) return;
+        _refreshing = true;
         RateUsage u;
         try { u = await _probe.FetchAsync(); }
         catch { u = RateUsage.Transient(); }
+        finally { _refreshing = false; }
         _last = u;
         ApplyIcon(u);
         if (_flyout is { Visible: true }) _flyout.Render(u);
@@ -172,5 +189,6 @@ public sealed class TrayController : IDisposable
         _currentIcon?.Dispose();
         _flyout?.Dispose();
         _menu.Dispose();
+        _probe.Dispose();
     }
 }

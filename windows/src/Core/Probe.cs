@@ -6,11 +6,12 @@ namespace ClaudeUsage.Core;
 
 // Fires the same Claude-Code-shaped probe the macOS app uses and reads the
 // anthropic-ratelimit-unified-* headers off the response (including a 429).
-public sealed class Probe
+public sealed class Probe : IDisposable
 {
     private const string Endpoint = "https://api.anthropic.com/v1/messages";
     private readonly HttpClient _http;
     private readonly ICredentialReader _creds;
+    private readonly bool _ownsHttp;
 
     public Probe(HttpClient http, ICredentialReader creds)
     {
@@ -19,8 +20,14 @@ public sealed class Probe
         _http.Timeout = TimeSpan.FromSeconds(20);
     }
 
-    // Convenience ctor for production use.
-    public Probe() : this(new HttpClient(), new FileCredentialReader()) { }
+    // Convenience ctor for production use: owns (and disposes) its own HttpClient.
+    public Probe() : this(new HttpClient(), new FileCredentialReader())
+        => _ownsHttp = true;
+
+    public void Dispose()
+    {
+        if (_ownsHttp) _http.Dispose();
+    }
 
     public async Task<RateUsage> FetchAsync(CancellationToken ct = default)
     {

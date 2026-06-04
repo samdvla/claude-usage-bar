@@ -16,8 +16,19 @@ public sealed class FlyoutForm : Form
     private readonly LinkLabel _refresh = new();
     private readonly LinkLabel _terminal = new();
 
+    private readonly List<Font> _fonts = new();
+
     public event Action? RefreshRequested;
     public event Action? OpenTerminalRequested;
+
+    // Tracks fonts so they can be disposed with the form (Control.Font does not
+    // take ownership of assigned Font instances).
+    private Font F(string family, float size, FontStyle style = FontStyle.Regular)
+    {
+        var f = new Font(family, size, style);
+        _fonts.Add(f);
+        return f;
+    }
 
     public FlyoutForm(Theme theme)
     {
@@ -37,7 +48,7 @@ public sealed class FlyoutForm : Form
         _header.AutoSize = false;
         _header.Dock = DockStyle.Top;
         _header.Height = 22;
-        _header.Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+        _header.Font = F("Segoe UI", 11f, FontStyle.Bold);
         _header.ForeColor = theme.Primary;
 
         foreach (var b in new[] { _bar5, _bar7 }) b.Dock = DockStyle.Top;
@@ -46,7 +57,7 @@ public sealed class FlyoutForm : Form
         {
             l.Dock = DockStyle.Top;
             l.Height = 18;
-            l.Font = new Font("Segoe UI", 9f);
+            l.Font = F("Segoe UI", 9f);
             l.ForeColor = theme.Secondary;
         }
 
@@ -55,7 +66,7 @@ public sealed class FlyoutForm : Form
         foreach (var lk in new[] { _refresh, _terminal })
         {
             lk.AutoSize = true;
-            lk.Font = new Font("Segoe UI", 9f);
+            lk.Font = F("Segoe UI", 9f);
             lk.LinkColor = theme.Secondary;
             lk.ActiveLinkColor = theme.Primary;
         }
@@ -137,5 +148,12 @@ public sealed class FlyoutForm : Form
         Location = new Point(Math.Max(wa.Left + 8, x), y);
         Show();
         Activate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            foreach (var f in _fonts) f.Dispose();
+        base.Dispose(disposing);
     }
 }
