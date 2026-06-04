@@ -46,6 +46,46 @@ public sealed class TrayController : IDisposable
         _timer.Start();
 
         Refresh();
+        PromoteToTaskbar();
+    }
+
+    // Windows 11 keeps newly-added tray icons in the "^" overflow until the user
+    // promotes them. We set IsPromoted=1 on our own NotifyIconSettings entry so the
+    // icon sits on the taskbar like the macOS menu bar. The entry exists once the
+    // icon has been added; re-toggling Visible makes the shell re-read it.
+    private void PromoteToTaskbar()
+    {
+        try
+        {
+            var me = Environment.ProcessPath;
+            if (me is null) return;
+            using var root = Registry.CurrentUser.OpenSubKey(
+                @"Control Panel\NotifyIconSettings", writable: true);
+            if (root is null) return;
+
+            bool changed = false;
+            foreach (var name in root.GetSubKeyNames())
+            {
+                using var k = root.OpenSubKey(name, writable: true);
+                if (k?.GetValue("ExecutablePath") is string exe &&
+                    string.Equals(exe, me, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (k.GetValue("IsPromoted") as int? != 1)
+                    {
+                        k.SetValue("IsPromoted", 1, RegistryValueKind.DWord);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (changed)
+            {
+                // Force the shell to re-read the promotion state.
+                _tray.Visible = false;
+                _tray.Visible = true;
+            }
+        }
+        catch { /* best effort */ }
     }
 
     private void ToggleFlyout()
