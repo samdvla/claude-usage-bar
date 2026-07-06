@@ -25,6 +25,7 @@ python3 -m venv "$VENV"
 # 2. CLI + menu bar app
 install -m 0755 "$REPO/bin/ccc" "$BIN/ccc"
 install -m 0755 "$REPO/bin/ccc-bar" "$BIN/ccc-bar"
+install -m 0755 "$REPO/bin/ccc-codex" "$BIN/ccc-codex"
 
 # 3. Menu bar icon (prebuilt; no image libs needed)
 cp "$REPO/assets/icon.png" "$CFGDIR/icon.png"
