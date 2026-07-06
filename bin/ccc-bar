@@ -356,7 +356,7 @@ def title_attr_string(entries, button):
     s = NSMutableAttributedString.alloc().init()
     for i, (glyph_path, fallback, rec) in enumerate(entries):
         if i:
-            s.appendAttributedString_(_seg_font("  ", color, font))
+            s.appendAttributedString_(_seg_font("     ", color, font))
         img = _tinted_glyph(glyph_path, dark)
         if img is not None:
             att = NSTextAttachment.alloc().init()
