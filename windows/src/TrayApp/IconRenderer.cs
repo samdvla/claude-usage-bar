@@ -13,20 +13,24 @@ public static class IconRenderer
 
     // Claude brand color (warm coral/orange) for the badge.
     private static readonly Color ClaudeOrange = Color.FromArgb(0xD9, 0x77, 0x57);
+    private static readonly Color CodexGray = Color.FromArgb(0xE8, 0xE8, 0xEC);
+    private static readonly Color CodexText = Color.FromArgb(0x1A, 0x1A, 0x1E);
 
     // Renders the 5h percent as a clean rounded "badge" in Claude's brand orange,
     // with a subtle vertical gradient and a crisp white number. The badge is the
     // brand mark; usage detail/health lives in the flyout bars. Rendered at high
     // resolution and downscaled by the shell so it stays sharp on any DPI.
-    public static Icon Render(double? util, bool dark, int size = 64)
+    public static Icon Render(double? util, bool dark, Provider provider = Provider.Claude, int size = 64)
     {
         int pct = util is null ? 0 : (int)Math.Round(util.Value * 100);
         string text = util is null ? "—" : (pct >= 100 ? "99" : pct.ToString());
         bool maxed = pct >= 100;
 
         Color baseColor = util is null
-            ? Color.FromArgb(120, 120, 128)                      // neutral grey when no login
-            : ClaudeOrange;
+            ? Color.FromArgb(120, 120, 128)                      // neutral grey when no data
+            : provider == Provider.Codex ? CodexGray : ClaudeOrange;
+        Color textColor = util is not null && provider == Provider.Codex
+            ? CodexText : Color.White;
 
         using var bmp = new Bitmap(size, size);
         using (var g = Graphics.FromImage(bmp))
@@ -51,24 +55,27 @@ public static class IconRenderer
                 g.DrawPath(pen, path);
             }
 
-            // Number — white, bold, fit to digit count.
+            // Number — bold, fit to digit count.
             float fontSize = text.Length >= 2 ? size * 0.50f : size * 0.66f;
             using var font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
             using var fmt = new StringFormat
             { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             var textRect = new RectangleF(0, -size * 0.02f, size, size);
-            using (var shadow = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
-                g.DrawString(text, font, shadow,
-                    new RectangleF(textRect.X, textRect.Y + size * 0.03f, textRect.Width, textRect.Height), fmt);
-            using (var white = new SolidBrush(Color.White))
-                g.DrawString(text, font, white, textRect, fmt);
+            if (textColor == Color.White)
+            {
+                using (var shadow = new SolidBrush(Color.FromArgb(70, 0, 0, 0)))
+                    g.DrawString(text, font, shadow,
+                        new RectangleF(textRect.X, textRect.Y + size * 0.03f, textRect.Width, textRect.Height), fmt);
+            }
+            using (var textBrush = new SolidBrush(textColor))
+                g.DrawString(text, font, textBrush, textRect, fmt);
 
             // A small "+" tick when maxed (>=100%) so 99 isn't mistaken for the cap.
             if (maxed)
             {
                 using var plusFont = new Font("Segoe UI", size * 0.30f, FontStyle.Bold, GraphicsUnit.Pixel);
-                using var white = new SolidBrush(Color.White);
-                g.DrawString("+", plusFont, white,
+                using var textBrush = new SolidBrush(textColor);
+                g.DrawString("+", plusFont, textBrush,
                     new RectangleF(size * 0.52f, size * 0.02f, size * 0.5f, size * 0.5f), fmt);
             }
         }
