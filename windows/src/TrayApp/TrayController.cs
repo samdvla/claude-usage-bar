@@ -152,8 +152,14 @@ public sealed class TrayController : IDisposable
         // stop overlapping probes (timer + manual + flyout-open) from piling up.
         if (_refreshing) return;
         _refreshing = true;
-        RateUsage u;
-        try { u = await _probe.FetchAsync(); }
+        RateUsage u = _last;
+        try
+        {
+            // Hidden Claude icon = no Claude API call at all — parity with the
+            // macOS app's "hidden provider = no probe" behavior (saves the
+            // token round trip + the rate-limit ping when only Codex is shown).
+            if (GetShow("ShowClaude")) u = await _probe.FetchAsync();
+        }
         catch { u = RateUsage.Transient(); }
         finally { _refreshing = false; }
         _last = u;
@@ -265,6 +271,7 @@ public sealed class TrayController : IDisposable
         _tray.Visible = false;
         _tray.Dispose();
         _currentIcon?.Dispose();
+        if (_trayCodex is not null) _trayCodex.Visible = false;
         _trayCodex?.Dispose();
         _currentCodexIcon?.Dispose();
         _flyout?.Dispose();

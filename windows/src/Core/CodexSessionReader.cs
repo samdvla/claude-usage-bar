@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -32,9 +33,17 @@ public sealed class CodexSessionReader
                 if (!rlEl.TryGetProperty(key, out var w) || w.ValueKind != JsonValueKind.Object)
                     return (null, null);
                 double? u = w.TryGetProperty("used_percent", out var up) &&
-                            up.ValueKind == JsonValueKind.Number ? up.GetDouble() : null;
-                long? r = w.TryGetProperty("resets_at", out var ra) &&
-                          ra.ValueKind == JsonValueKind.Number ? ra.GetInt64() : null;
+                            up.ValueKind == JsonValueKind.Number &&
+                            up.TryGetDouble(out var ud) ? ud : null;
+                // resets_at is normally a whole-second epoch, but tolerate a
+                // fractional value (e.g. "1783300000.5") the same way the
+                // Python reader's dynamic typing does implicitly.
+                long? r = null;
+                if (w.TryGetProperty("resets_at", out var ra) && ra.ValueKind == JsonValueKind.Number)
+                {
+                    if (ra.TryGetInt64(out var l)) r = l;
+                    else if (ra.TryGetDouble(out var dbl)) r = (long)Math.Floor(dbl);
+                }
                 if (r is not null && nowEpoch > r) { u = 0.0; r = null; }
                 return (u is null ? null : Math.Round(u.Value / 100.0, 4), r);
             }
@@ -51,15 +60,43 @@ public sealed class CodexSessionReader
         return RateUsage.NoData(Provider.Codex);
     }
 
+    // Directory.GetDirectories/GetFiles throw on a permission-denied or
+    // vanished-mid-walk entry; since SessionFiles is an iterator (can't
+    // yield inside a try/catch), enumeration failures are isolated here and
+    // degrade to "nothing under this node" instead of aborting the whole
+    // walk (parity with the Python reader's per-level `except OSError`).
+    private static string[] SafeDirs(string path)
+    {
+        try { return Directory.GetDirectories(path); }
+        catch (Exception e) when (e is UnauthorizedAccessException or IOException)
+        { return Array.Empty<string>(); }
+    }
+
+    private static string[] SafeFiles(string path, string pattern)
+    {
+        try { return Directory.GetFiles(path, pattern); }
+        catch (Exception e) when (e is UnauthorizedAccessException or IOException)
+        { return Array.Empty<string>(); }
+    }
+
+    private static bool IsAllDigits(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.Length > 0 && name.All(char.IsDigit);
+    }
+
     private IEnumerable<string> SessionFiles()
     {
         if (!Directory.Exists(_root)) yield break;
         int yielded = 0;
-        foreach (var y in Directory.GetDirectories(_root).OrderDescending())
-        foreach (var m in Directory.GetDirectories(y).OrderDescending())
-        foreach (var d in Directory.GetDirectories(m).OrderDescending())
+        // Top-level dirs must be all-digit (year) names — parity with the
+        // Python reader's `d.isdigit()` filter — so a stray non-year entry
+        // under the sessions root can't be walked as if it were one.
+        foreach (var y in SafeDirs(_root).Where(IsAllDigits).OrderDescending())
+        foreach (var m in SafeDirs(y).OrderDescending())
+        foreach (var d in SafeDirs(m).OrderDescending())
         {
-            var files = Directory.GetFiles(d, "rollout-*.jsonl")
+            var files = SafeFiles(d, "rollout-*.jsonl")
                 .OrderByDescending(File.GetLastWriteTimeUtc);
             foreach (var f in files)
             {
@@ -89,7 +126,14 @@ public sealed class CodexSessionReader
             {
                 using var doc = JsonDocument.Parse(lines[i]);
                 var rootEl = doc.RootElement;
-                if (!rootEl.TryGetProperty("payload", out var payload) ||
+                // ValueKind guards precede every TryGetProperty on a
+                // non-guaranteed-object element: calling TryGetProperty on a
+                // non-object JsonElement (e.g. a line whose "payload" is a
+                // string or number) throws InvalidOperationException, which
+                // the catch below (JsonException-only) does not catch.
+                if (rootEl.ValueKind != JsonValueKind.Object ||
+                    !rootEl.TryGetProperty("payload", out var payload) ||
+                    payload.ValueKind != JsonValueKind.Object ||
                     !payload.TryGetProperty("rate_limits", out var rl) ||
                     rl.ValueKind != JsonValueKind.Object ||
                     !rl.TryGetProperty("primary", out _))
@@ -106,8 +150,8 @@ public sealed class CodexSessionReader
     private static long? ParseIso(string? ts)
     {
         if (ts is null) return null;
-        return DateTimeOffset.TryParse(ts, null,
-            System.Globalization.DateTimeStyles.AdjustToUniversal, out var dto)
+        return DateTimeOffset.TryParse(ts, CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal, out var dto)
             ? dto.ToUnixTimeSeconds() : null;
     }
 }
