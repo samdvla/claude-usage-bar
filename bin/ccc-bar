@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ccc-bar — Claude usage in the macOS menu bar.
+"""ccc-bar — Claude + Codex usage in the macOS menu bar.
 
 Zero setup: if you use Claude Code, the app reads its existing OAuth token from
 your Keychain and makes one tiny probe call to read Anthropic's real
@@ -10,6 +10,8 @@ Template terminal icon + 5h% in the bar; dropdown shows color-coded progress
 bars and the 5h reset countdown. A normal, quittable app — reopen via
 Spotlight/Applications, `open -a "Claude Usage"`, or the `ccc` CLI.
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -20,9 +22,10 @@ import urllib.request
 
 import rumps
 from AppKit import (NSApplication, NSColor, NSFont, NSFontAttributeName,
-                    NSForegroundColorAttributeName, NSStatusBar)
-from Foundation import (NSMutableAttributedString, NSAttributedString, NSObject,
-                        NSUserDefaults)
+                    NSForegroundColorAttributeName, NSImage, NSStatusBar,
+                    NSTextAttachment)
+from Foundation import (NSMakeRect, NSMakeSize, NSMutableAttributedString,
+                        NSAttributedString, NSObject, NSUserDefaults)
 from PyObjCTools import AppHelper
 
 ICON = os.path.expanduser("~/.config/ccc/icon.png")
@@ -37,6 +40,25 @@ R5_KEY = "anthropic-ratelimit-unified-5h-utilization"
 R7_KEY = "anthropic-ratelimit-unified-7d-utilization"
 RESET5_KEY = "anthropic-ratelimit-unified-5h-reset"
 RESET7_KEY = "anthropic-ratelimit-unified-7d-reset"
+
+GLYPH_CLAUDE = os.path.expanduser("~/.config/ccc/claude-glyph.png")
+GLYPH_CODEX = os.path.expanduser("~/.config/ccc/codex-glyph.png")
+
+
+def _load_ccc_codex():
+    """ccc-codex sits next to this file (repo bin/ or ~/.local/bin)."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccc-codex")
+    try:
+        loader = importlib.machinery.SourceFileLoader("ccccodex", p)
+        spec = importlib.util.spec_from_loader("ccccodex", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+_CODEX = _load_ccc_codex()
 
 DEFAULTS_SUITE = "com.claude-usage-bar"
 SELFHEAL_KEY = "selfHeal"
@@ -143,6 +165,42 @@ def fetch():
     return {"rate_headers": headers, "plan": creds.get("subscriptionType")}
 
 
+def claude_usage():
+    """Normalize the probe result to the shared provider-record shape."""
+    data = fetch()
+    if data is None:
+        return {"state": "no_login"}
+    if data.get("error"):
+        return {"state": "expired" if data["error"] == "expired" else "error"}
+    rh = data["rate_headers"]
+
+    def _i(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    return {"state": "ok", "u5": f(rh.get(R5_KEY)), "u7": f(rh.get(R7_KEY)),
+            "r5": _i(rh.get(RESET5_KEY)), "r7": _i(rh.get(RESET7_KEY)),
+            "plan": (data.get("plan") or "").title() or None, "as_of": None}
+
+
+def codex_usage():
+    if _CODEX is None:
+        return {"state": "no_data"}
+    try:
+        return _CODEX.codex_usage()
+    except Exception:
+        return {"state": "no_data"}
+
+
+# Ordered: (record key, defaults key, glyph path, fetcher, text fallback)
+PROVIDERS = (
+    ("claude", SHOW_CLAUDE_KEY, GLYPH_CLAUDE, claude_usage, "C:"),
+    ("codex", SHOW_CODEX_KEY, GLYPH_CODEX, codex_usage, "X:"),
+)
+
+
 # ---------------------------------------------------------------- formatting
 def f(util):
     try:
@@ -178,6 +236,15 @@ def countdown(ts):
     return f"{d // 3600}h {(d % 3600) // 60:02d}m"
 
 
+def _age(ts):
+    d = max(0, int(time.time()) - int(ts))
+    if d >= 86400:
+        return f"{d // 86400}d"
+    if d >= 3600:
+        return f"{d // 3600}h {(d % 3600) // 60}m"
+    return f"{d // 60}m"
+
+
 def _seg(text, color, size=12, weight=W_REG):
     font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
     return NSAttributedString.alloc().initWithString_attributes_(
@@ -205,6 +272,51 @@ def bar_row(util, label, age, active):
 
 def info_row(text):
     return _seg(text, NSColor.secondaryLabelColor(), 11, W_REG)
+
+
+_GLYPH_CACHE = {}
+
+
+def _glyph(path):
+    """Template NSImage for the menu-bar title, or None (text fallback)."""
+    if path not in _GLYPH_CACHE:
+        img = NSImage.alloc().initWithContentsOfFile_(path)
+        if img is not None:
+            img.setTemplate_(True)
+            img.setSize_(NSMakeSize(15, 15))
+        _GLYPH_CACHE[path] = img
+    return _GLYPH_CACHE[path]
+
+
+def _title_value(rec):
+    if rec["state"] == "ok":
+        return pct(rec.get("u5"))
+    return "⚠" if rec["state"] in ("expired", "error") else "–"
+
+
+def title_attr_string(entries):
+    """entries: [(glyph_path, text_fallback, rec)] → attributed title.
+
+    Glyph images ride in NSTextAttachments (bounds y-offset centers them on
+    the menu-bar text baseline); values use the same monospaced font as the
+    old plain-text title.
+    """
+    s = NSMutableAttributedString.alloc().init()
+    color = NSColor.labelColor()
+    for i, (glyph_path, fallback, rec) in enumerate(entries):
+        if i:
+            s.appendAttributedString_(_seg("  ", color, 12, W_REG))
+        img = _glyph(glyph_path)
+        if img is not None:
+            att = NSTextAttachment.alloc().init()
+            att.setImage_(img)
+            att.setBounds_(NSMakeRect(0, -3, 15, 15))
+            s.appendAttributedString_(
+                NSAttributedString.attributedStringWithAttachment_(att))
+            s.appendAttributedString_(_seg(" " + _title_value(rec), color, 12, W_SEMI))
+        else:
+            s.appendAttributedString_(_seg(fallback + _title_value(rec), color, 12, W_SEMI))
+    return s
 
 
 # ---------------------------------------------------------------- the app
@@ -263,35 +375,23 @@ class CCCBar(rumps.App):
         return item
 
     def _menu_tail(self):
+        settings = rumps.MenuItem("Settings")
+        show_c = rumps.MenuItem("Show Claude",
+                                callback=lambda s: self._toggle_provider(s, SHOW_CLAUDE_KEY))
+        show_c.state = 1 if provider_enabled(SHOW_CLAUDE_KEY) else 0
+        show_x = rumps.MenuItem("Show Codex",
+                                callback=lambda s: self._toggle_provider(s, SHOW_CODEX_KEY))
+        show_x.state = 1 if provider_enabled(SHOW_CODEX_KEY) else 0
         heal = rumps.MenuItem("Auto-restore icon", callback=self.toggle_self_heal)
         heal.state = 1 if self_heal_enabled() else 0
+        settings.update([show_c, show_x, heal])
         return [
             None,
             rumps.MenuItem("Refresh now", callback=self.refresh),
-            heal,
+            settings,
             rumps.MenuItem("Open in Terminal", callback=self.open_terminal),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
-
-    def _show(self, header_rows, reset_ts, reset7_ts=None, subtitle=None):
-        head = "Claude usage" + (f"  ·  {subtitle}" if subtitle else "")
-        items = [self._attr_item("hdr", info_row(head)), None]
-        items += header_rows
-        items.append(None)
-        items.append(self._attr_item("reset5h", info_row(f"5h resets in {countdown(reset_ts)}")))
-        if reset7_ts is not None:
-            items.append(self._attr_item("reset7d", info_row(f"7d resets in {countdown(reset7_ts)}")))
-        items += self._menu_tail()
-        self.menu.clear()
-        self.menu = items
-        self._attach_open_delegate()
-
-    def _show_message(self, text):
-        items = [self._attr_item("msg", info_row(text))]
-        items += self._menu_tail()
-        self.menu.clear()
-        self.menu = items
-        self._attach_open_delegate()
 
     def refresh(self, _, rebuild_menu=True):
         # Probe is a network call — run it off the main thread so opening the
@@ -332,43 +432,94 @@ class CCCBar(rumps.App):
 
     def _refresh_worker(self):
         try:
-            data = fetch()
+            # Fetch only enabled providers — a hidden Claude means no probe
+            # call at all (saves the token + the rate-limit ping).
+            data = {}
+            for key, setting, _glyph_path, fetcher, _fb in PROVIDERS:
+                if provider_enabled(setting):
+                    data[key] = fetcher()
         finally:
             self._refreshing = False
         AppHelper.callAfter(self._apply, data)
 
     def _apply(self, data):
         rebuild = self._rebuild_menu_next
-        if data is None:
-            self.title = " –"
-            if rebuild:
-                self._show_message("No Claude Code login found — open Claude Code.")
-            return
-        if data.get("error"):
-            self.title = " ⚠"
-            if rebuild:
-                msg = ("Claude Code login expired — open Claude Code to refresh"
-                       if data["error"] == "expired"
-                       else "Couldn't read usage — try again shortly")
-                self._show_message(msg)
-            return
-
-        rh = data["rate_headers"]
-        u5, u7 = rh.get(R5_KEY), rh.get(R7_KEY)
-        self.title = " " + pct(u5)
+        entries = [(g, fb, data[k]) for k, s, g, fetch_, fb in PROVIDERS
+                   if k in data]
+        if not entries:
+            # Both providers hidden: show the app icon so the item stays
+            # clickable, clear the title.
+            self.icon = ICON if os.path.exists(ICON) else None
+            self.title = ""
+        else:
+            self.icon = None
+            self.title = ""  # rumps clears the plain title...
+            try:              # ...then the attributed one paints over it.
+                btn = self._nsapp.nsstatusitem.button()
+                btn.setAttributedTitle_(title_attr_string(entries))
+            except Exception:
+                # No button API (very old macOS) — plain-text fallback.
+                self.title = " ".join(
+                    fb + _title_value(rec) for _g, fb, rec in entries)
         if rebuild:
-            plan = (data.get("plan") or "").title()
-            rows = [
-                self._attr_item("c5h", bar_row(u5, "5h", "", True)),
-                self._attr_item("c7d", bar_row(u7, "7d", "", True)),
-            ]
-            self._show(rows, rh.get(RESET5_KEY), rh.get(RESET7_KEY), subtitle=plan)
+            self._show(data)
+
+    def _section_rows(self, name, rec):
+        rows = []
+        head = name + (f" · {rec['plan']}" if rec.get("plan") else "")
+        as_of = rec.get("as_of")
+        if as_of and time.time() - as_of > REFRESH_SECONDS:
+            head += f"   · as of {_age(as_of)} ago"
+        rows.append(self._attr_item(name + "_hdr", info_row(head)))
+        state = rec["state"]
+        if state == "ok":
+            rows.append(self._attr_item(name + "_5h", bar_row(rec.get("u5"), "  5h", "", True)))
+            rows.append(self._attr_item(name + "_7d", bar_row(rec.get("u7"), "  7d", "", True)))
+            resets = []
+            if rec.get("r5"):
+                resets.append(f"5h in {countdown(rec['r5'])}")
+            if rec.get("r7"):
+                resets.append(f"7d in {countdown(rec['r7'])}")
+            if resets:
+                rows.append(self._attr_item(name + "_rst",
+                                            info_row("  resets " + " · ".join(resets))))
+        else:
+            msg = {
+                "no_login": "  No Claude Code login found — open Claude Code",
+                "expired": "  Login expired — open Claude Code to refresh",
+                "no_data": "  No Codex sessions found — run codex once",
+            }.get(state, "  Couldn't read usage — try again shortly")
+            rows.append(self._attr_item(name + "_err", info_row(msg)))
+        return rows
+
+    def _show(self, data):
+        items = [self._attr_item("hdr", info_row("usage")), None]
+        first = True
+        for key, setting, _g, _f, _fb in PROVIDERS:
+            if key not in data:
+                continue
+            if not first:
+                items.append(None)
+            first = False
+            items += self._section_rows(key.title(), data[key])
+        if first:  # nothing enabled
+            items.append(self._attr_item("none", info_row("All providers hidden — Settings ▸")))
+        items += self._menu_tail()
+        self.menu.clear()
+        self.menu = items
+        self._attach_open_delegate()
 
     # --------------------------------------------------- menu actions
     def toggle_self_heal(self, sender):
         new = not self_heal_enabled()
         set_self_heal(new)
         sender.state = 1 if new else 0
+
+    def _toggle_provider(self, sender, key):
+        new = not provider_enabled(key)
+        set_provider_enabled(key, new)
+        sender.state = 1 if new else 0
+        self.refresh(None)  # repaint title + dropdown immediately
 
     def open_terminal(self, _):
         subprocess.Popen(
