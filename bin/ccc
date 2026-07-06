@@ -120,7 +120,8 @@ if [ "$WATCH" = "1" ] && [ "$JSON" != "1" ]; then
   while true; do clear; render || true; render_codex || true
     printf "  ${C_DIM}refreshing every %ss · ctrl-c to quit${C_RST}\n" "$INTERVAL"; sleep "$INTERVAL"; done
 else
-  render || true
+  rc=0; render || rc=$?
   if [ "$JSON" = "1" ]; then python3 "$(codex_helper)" 2>/dev/null || true
   else render_codex; fi
+  exit "$rc"
 fi

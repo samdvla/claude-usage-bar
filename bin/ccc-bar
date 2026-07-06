@@ -456,6 +456,7 @@ class CCCBar(rumps.App):
             pass
         _APP = self
         self._refreshing = False
+        self._refresh_again = False
         self._restoring = False
         self._rebuild_menu_next = True
         self._codex_item = None  # lazily-created second NSStatusItem
@@ -588,6 +589,12 @@ class CCCBar(rumps.App):
         # Probe is a network call — run it off the main thread so opening the
         # menu never blocks. Apply the result back on the main thread.
         if self._refreshing:
+            # A refresh is already in flight (e.g. the dropdown-open probe) —
+            # this call would otherwise be silently dropped. Queue it so a
+            # toggle/manual refresh that lands mid-probe still takes effect
+            # once the in-flight one finishes, instead of waiting up to
+            # REFRESH_SECONDS for the next periodic tick.
+            self._refresh_again = True
             return
         self._refreshing = True
         self._rebuild_menu_next = rebuild_menu
@@ -724,6 +731,12 @@ class CCCBar(rumps.App):
 
         if rebuild:
             self._show(data)
+
+        if self._refresh_again:
+            # A refresh landed while this one was in flight (see refresh()) —
+            # run it now that painting is done, rather than dropping it.
+            self._refresh_again = False
+            self.refresh(None)
 
     def _section_rows(self, name, rec):
         rows = []

@@ -195,5 +195,8 @@ Both providers can be shown or hidden independently:
 [MIT](LICENSE) © 2026 Sam Davila
 
 macOS app built with [rumps](https://github.com/jaredks/rumps) (BSD); Windows
-app built on .NET / WinForms. All application code and icon artwork are original
-to this project.
+app built on .NET / WinForms. Application code and the terminal/app icons are
+original to this project; the Claude and OpenAI provider glyphs are rasterized
+from the CC0-licensed [simple-icons](https://simpleicons.org) set and remain
+their respective owners' trademarks, used nominatively to label each
+provider's own usage number.
