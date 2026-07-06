@@ -97,6 +97,8 @@ render_codex() {
   u7=$(echo "$rec" | jq -r '.u7 // 0' 2>/dev/null) || u7=0
   r5=$(echo "$rec" | jq -r '.r5 // empty' 2>/dev/null) || r5=""
   asof=$(echo "$rec" | jq -r '.as_of // empty' 2>/dev/null) || asof=""
+  [[ "$asof" =~ ^[0-9]+$ ]] || asof=""
+  [[ "$r5" =~ ^[0-9]+$ ]] || r5=""
   if [ -n "$asof" ]; then
     local age=$(( $(date +%s) - asof ))
     [ "$age" -gt 120 ] && agestr=" · as of $((age/60))m ago"
