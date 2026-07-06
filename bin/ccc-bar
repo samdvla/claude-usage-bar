@@ -40,6 +40,8 @@ RESET7_KEY = "anthropic-ratelimit-unified-7d-reset"
 
 DEFAULTS_SUITE = "com.claude-usage-bar"
 SELFHEAL_KEY = "selfHeal"
+SHOW_CLAUDE_KEY = "showClaude"
+SHOW_CODEX_KEY = "showCodex"
 
 
 # ---------------------------------------------------------------- settings
@@ -59,6 +61,17 @@ def self_heal_enabled():
 
 def set_self_heal(on):
     _defaults().setBool_forKey_(bool(on), SELFHEAL_KEY)
+
+
+def provider_enabled(key):
+    d = _defaults()
+    if d.objectForKey_(key) is None:
+        return True  # both providers default ON
+    return bool(d.boolForKey_(key))
+
+
+def set_provider_enabled(key, on):
+    _defaults().setBool_forKey_(bool(on), key)
 
 
 # ---------------------------------------------------------------- claude code
