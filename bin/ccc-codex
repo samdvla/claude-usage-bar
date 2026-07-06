@@ -22,6 +22,14 @@ TAIL_BYTES = 64 * 1024
 MAX_FILES = 3
 
 
+def _mtime(p):
+    """Safe mtime: returns 0.0 if file missing or unreadable (race-safe sort key)."""
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return 0.0
+
+
 def _session_files(root, limit=MAX_FILES):
     """Newest rollout-*.jsonl paths, newest day first, mtime-desc within a day."""
     out = []
@@ -39,7 +47,11 @@ def _session_files(root, limit=MAX_FILES):
             mdir = os.path.join(ydir, mo)
             if not os.path.isdir(mdir):
                 continue
-            for day in sorted(os.listdir(mdir), reverse=True):
+            try:
+                days = sorted(os.listdir(mdir), reverse=True)
+            except OSError:
+                continue
+            for day in days:
                 ddir = os.path.join(mdir, day)
                 if not os.path.isdir(ddir):
                     continue
@@ -48,7 +60,7 @@ def _session_files(root, limit=MAX_FILES):
                           if f.startswith("rollout-") and f.endswith(".jsonl")]
                 except OSError:
                     continue
-                fs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                fs.sort(key=_mtime, reverse=True)
                 out.extend(fs)
                 if len(out) >= limit:
                     return out[:limit]

@@ -1,4 +1,5 @@
 import importlib.machinery, importlib.util, json, pathlib, time
+import pytest
 
 _MOD = None
 
@@ -84,3 +85,20 @@ def test_no_data_when_missing(tmp_path):
     assert m.codex_usage(root=str(tmp_path / "nope"), now=NOW) == {"state": "no_data"}
     root = _mkroot(tmp_path, [("2026/07/06/rollout-a.jsonl", ["{}"])])
     assert m.codex_usage(root=root, now=NOW)["state"] == "no_data"
+
+def test_unreadable_dir_degrades_gracefully(tmp_path):
+    import os
+    m = _load()
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 doesn't block root")
+    root = _mkroot(tmp_path, [
+        ("2026/07/06/rollout-a.jsonl", [_event(u5=50.0)]),
+    ])
+    # make the day directory unreadable
+    ddir = pathlib.Path(root) / "2026" / "07" / "06"
+    try:
+        os.chmod(str(ddir), 0o000)
+        rec = m.codex_usage(root=root, now=NOW)
+        assert rec == {"state": "no_data"}
+    finally:
+        os.chmod(str(ddir), 0o700)
