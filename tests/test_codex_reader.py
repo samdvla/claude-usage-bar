@@ -102,3 +102,20 @@ def test_unreadable_dir_degrades_gracefully(tmp_path):
         assert rec == {"state": "no_data"}
     finally:
         os.chmod(str(ddir), 0o700)
+
+def test_unreadable_month_dir_degrades_gracefully(tmp_path):
+    import os
+    m = _load()
+    if os.geteuid() == 0:
+        pytest.skip("running as root; chmod 000 doesn't block root")
+    root = _mkroot(tmp_path, [
+        ("2026/07/06/rollout-a.jsonl", [_event(u5=50.0)]),
+    ])
+    # make the MONTH directory unreadable — pins the os.listdir(mdir) guard
+    mdir = pathlib.Path(root) / "2026" / "07"
+    try:
+        os.chmod(str(mdir), 0o000)
+        rec = m.codex_usage(root=root, now=NOW)
+        assert rec == {"state": "no_data"}
+    finally:
+        os.chmod(str(mdir), 0o700)
