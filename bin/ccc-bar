@@ -21,10 +21,12 @@ import urllib.error
 import urllib.request
 
 import rumps
-from AppKit import (NSApplication, NSColor, NSFont, NSFontAttributeName,
-                    NSForegroundColorAttributeName, NSImage, NSStatusBar,
-                    NSTextAttachment)
-from Foundation import (NSMakeRect, NSMakeSize, NSMutableAttributedString,
+from AppKit import (NSApplication, NSColor, NSCompositingOperationSourceAtop,
+                    NSFont, NSFontAttributeName,
+                    NSForegroundColorAttributeName, NSImage,
+                    NSRectFillUsingOperation, NSStatusBar, NSTextAttachment)
+from Foundation import (NSDistributedNotificationCenter, NSMakeRect,
+                        NSMakeSize, NSMutableAttributedString,
                         NSAttributedString, NSObject, NSUserDefaults)
 from PyObjCTools import AppHelper
 
@@ -245,10 +247,14 @@ def _age(ts):
     return f"{d // 60}m"
 
 
-def _seg(text, color, size=12, weight=W_REG):
-    font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+def _seg_font(text, color, font):
     return NSAttributedString.alloc().initWithString_attributes_(
         text, {NSFontAttributeName: font, NSForegroundColorAttributeName: color})
+
+
+def _seg(text, color, size=12, weight=W_REG):
+    font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+    return _seg_font(text, color, font)
 
 
 def bar_row(util, label, age, active):
@@ -275,17 +281,56 @@ def info_row(text):
 
 
 _GLYPH_CACHE = {}
+_TINTED_CACHE = {}
 
 
 def _glyph(path):
-    """Template NSImage for the menu-bar title, or None (text fallback)."""
+    """Base NSImage for a title glyph, or None (text fallback).
+
+    Deliberately NOT a template image: the glyph is drawn via an
+    NSTextAttachment inside an NSAttributedString title, and that text-layout
+    drawing path ignores setTemplate_ auto-tinting (it only applies when
+    NSButton/NSImageView draws the image directly). Tinting instead happens
+    explicitly in _tinted_glyph() below, per the button's effective appearance.
+    """
     if path not in _GLYPH_CACHE:
         img = NSImage.alloc().initWithContentsOfFile_(path)
         if img is not None:
-            img.setTemplate_(True)
             img.setSize_(NSMakeSize(15, 15))
         _GLYPH_CACHE[path] = img
     return _GLYPH_CACHE[path]
+
+
+def _tinted_copy(img, color):
+    """A solid-color copy of a black-on-transparent glyph (alpha preserved)."""
+    t = img.copy()
+    t.lockFocus()
+    color.set()
+    NSRectFillUsingOperation(((0, 0), t.size()), NSCompositingOperationSourceAtop)
+    t.unlockFocus()
+    return t
+
+
+def _tinted_glyph(path, dark):
+    """Cached white (dark menu bar) or black (light menu bar) glyph variant."""
+    key = (path, dark)
+    if key not in _TINTED_CACHE:
+        base = _glyph(path)
+        _TINTED_CACHE[key] = None if base is None else _tinted_copy(
+            base, NSColor.whiteColor() if dark else NSColor.blackColor())
+    return _TINTED_CACHE[key]
+
+
+def _menu_bar_dark(button):
+    """Best-effort read of whether the status item currently sits on a dark
+    (Dark Aqua) menu bar, from the button's effective appearance."""
+    try:
+        ap = button.effectiveAppearance()
+        name = ap.bestMatchFromAppearancesWithNames_(
+            ["NSAppearanceNameAqua", "NSAppearanceNameDarkAqua"])
+        return name == "NSAppearanceNameDarkAqua"
+    except Exception:
+        return True  # menu bars are most often dark; white glyph is the safer default
 
 
 def _title_value(rec):
@@ -294,28 +339,34 @@ def _title_value(rec):
     return "⚠" if rec["state"] in ("expired", "error") else "–"
 
 
-def title_attr_string(entries):
+def title_attr_string(entries, button):
     """entries: [(glyph_path, text_fallback, rec)] → attributed title.
 
     Glyph images ride in NSTextAttachments (bounds y-offset centers them on
-    the menu-bar text baseline); values use the same monospaced font as the
-    old plain-text title.
+    the menu-bar text baseline) and are tinted white/black to match the
+    button's current (light/dark) menu-bar appearance, since the attachment
+    drawing path doesn't honor NSImage template auto-tinting. Values and
+    separators use the system menu-bar font with monospaced digits (native
+    SF Pro, matches the rest of the menu bar — no SF Mono width jitter).
     """
-    s = NSMutableAttributedString.alloc().init()
+    dark = _menu_bar_dark(button)
+    size = NSFont.menuBarFontOfSize_(0).pointSize()
+    font = NSFont.monospacedDigitSystemFontOfSize_weight_(size, W_REG)
     color = NSColor.labelColor()
+    s = NSMutableAttributedString.alloc().init()
     for i, (glyph_path, fallback, rec) in enumerate(entries):
         if i:
-            s.appendAttributedString_(_seg("  ", color, 12, W_REG))
-        img = _glyph(glyph_path)
+            s.appendAttributedString_(_seg_font("  ", color, font))
+        img = _tinted_glyph(glyph_path, dark)
         if img is not None:
             att = NSTextAttachment.alloc().init()
             att.setImage_(img)
             att.setBounds_(NSMakeRect(0, -3, 15, 15))
             s.appendAttributedString_(
                 NSAttributedString.attributedStringWithAttachment_(att))
-            s.appendAttributedString_(_seg(" " + _title_value(rec), color, 12, W_SEMI))
+            s.appendAttributedString_(_seg_font(" " + _title_value(rec), color, font))
         else:
-            s.appendAttributedString_(_seg(fallback + _title_value(rec), color, 12, W_SEMI))
+            s.appendAttributedString_(_seg_font(fallback + _title_value(rec), color, font))
     return s
 
 
@@ -328,6 +379,12 @@ class _MenuDelegate(NSObject):
     def menuWillOpen_(self, menu):
         if _APP is not None:
             _APP.refresh(None)
+
+    def themeChanged_(self, note):
+        # Light/dark menu bar switch — repaint the title so glyphs re-tint
+        # promptly instead of waiting for the next periodic tick.
+        if _APP is not None:
+            AppHelper.callAfter(_APP.refresh, None)
 
 
 class CCCBar(rumps.App):
@@ -346,6 +403,9 @@ class CCCBar(rumps.App):
         self._rebuild_menu_next = True
         self._menu_delegate = _MenuDelegate.alloc().init()
         self._delegate_attached = False
+        NSDistributedNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._menu_delegate, "themeChanged:",
+            "AppleInterfaceThemeChangedNotification", None)
         # Background ticks update only the menu-bar title (cheap, in place); they
         # do NOT rebuild the dropdown. The dropdown rebuilds on open / manual
         # refresh / after a wake-recreate.
@@ -456,7 +516,7 @@ class CCCBar(rumps.App):
             self.title = ""  # rumps clears the plain title...
             try:              # ...then the attributed one paints over it.
                 btn = self._nsapp.nsstatusitem.button()
-                btn.setAttributedTitle_(title_attr_string(entries))
+                btn.setAttributedTitle_(title_attr_string(entries, btn))
             except Exception:
                 # No button API (very old macOS) — plain-text fallback.
                 self.title = " ".join(
