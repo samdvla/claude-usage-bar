@@ -34,8 +34,8 @@ either provider independently from Settings.
 | | macOS | Windows |
 |---|---|---|
 | Lives in | Menu bar (top) | System tray / taskbar (bottom-right) |
-| At-a-glance | Per-provider glyph (Claude spark / OpenAI blossom) + 5h % text | One badge per enabled provider (Claude-orange / neutral-gray Codex) with the 5h % |
-| Detail view | Menu dropdown, one section per provider | Shared flyout (left-click), one section per provider |
+| At-a-glance | One menu bar item per enabled provider (Claude spark / OpenAI blossom glyph + 5h %) | One badge per enabled provider (Claude-orange / neutral-gray Codex) with the 5h % |
+| Detail view | Shared dropdown, one section per provider | Shared flyout (left-click), one section per provider |
 | Toggle providers | Dropdown ▸ Settings ▸ Show Claude / Show Codex | Right-click ▸ Show Claude icon / Show Codex icon |
 | CLI | `ccc` | `ccc.exe` |
 | Stack | Python (rumps) | .NET 8 (WinForms), single self-contained `.exe` |
@@ -62,15 +62,15 @@ cd claude-usage-bar
 ./install.sh
 ```
 
-An icon appears in your menu bar within a few seconds — the Claude spark
-and/or OpenAI blossom glyph plus each provider's 5h %, once it has data. On
-first launch macOS may ask permission to read your Claude Code login from the
-Keychain — click **Allow** (or **Always Allow**).
+Within a few seconds your menu bar gains one item per enabled provider, side
+by side — the Claude spark and the OpenAI blossom glyph, each with its own
+5h % once it has data. On first launch macOS may ask permission to read your
+Claude Code login from the Keychain — click **Allow** (or **Always Allow**).
 
 ### Use
-- The menu bar shows current 5h utilization per enabled provider. Click it
-  for the dropdown (5h/7d bars and reset countdowns per provider, Refresh,
-  Open in Terminal, Quit).
+- Each menu bar item shows that provider's current 5h utilization. Click
+  either for the shared dropdown (5h/7d bars and reset countdowns per
+  provider, Refresh, Open in Terminal, Quit).
 - **Settings ▸** in the dropdown: **Show Claude** / **Show Codex** toggle each
   provider independently (both on by default), plus **Auto-restore icon**.
 - `ccc` (one-shot, Claude + Codex sections), `ccc --watch` (live), `ccc --json`
