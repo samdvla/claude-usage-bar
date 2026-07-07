@@ -160,3 +160,14 @@ def test_reset_bar_defaults_removes_all_keys():
         assert d.objectForKey_(key) is None, key
     assert m.health_custom_color(m.HEALTH_RED_KEY) is None
     assert (m.warn_threshold(), m.crit_threshold()) == (0.5, 0.8)
+
+
+def test_resolve_threshold_pick_collisions():
+    m = _load()
+    # warn picked up INTO crit -> crit bumps to next choice above
+    assert m.resolve_threshold_pick("warn", 0.7, 0.5, 0.7) == (0.7, 0.8)
+    # crit picked down INTO warn -> warn drops to next choice below
+    assert m.resolve_threshold_pick("crit", 0.7, 0.7, 0.8) == (0.6, 0.7)
+    # no collision -> counterpart untouched
+    assert m.resolve_threshold_pick("warn", 0.3, 0.5, 0.8) == (0.3, 0.8)
+    assert m.resolve_threshold_pick("crit", 0.95, 0.5, 0.8) == (0.5, 0.95)

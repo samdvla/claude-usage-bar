@@ -66,9 +66,10 @@ BAR_ROW_H = 28    # 26 + 2pt air between bars (layout-polish round)
 # a naive ~30pt guess clipped it into "montl". 2pt label inset + ~37pt text +
 # ~5pt breathing room before the track.
 BAR_TRACK_X = 44
-# % column: must fit the widest possible value, "est. 100%" (or "est. 120%"
-# for an over-cap Gemini estimate), ~56.6pt at 11pt monospacedDigit semibold —
-# 72 minus BAR_PCT_GAP and BAR_RIGHT_PAD leaves a 58pt text region.
+# % column: left-anchored at the track edge + BAR_PCT_GAP. Nominal region is
+# 72 - GAP - PAD = 52pt; the widest value ("est. 100%", ~56.6pt at 11pt
+# monospacedDigit semibold) overflows rightward into BAR_RIGHT_PAD, leaving
+# ~5.4pt to the row edge — accepted (never collides with the track).
 BAR_TRACK_RIGHT_MARGIN = 72  # track ends at (width - this); rest is the % column
 BAR_TRACK_H = 17
 BAR_TRACK_RADIUS = 3.0    # near-rectangular with slight rounding (revised §5b)
@@ -281,6 +282,24 @@ def warn_threshold():
 
 def crit_threshold():
     return _thresholds()[1]
+
+
+def resolve_threshold_pick(kind, v, cur_warn, cur_crit):
+    """New (warn, crit) pair for a picker selection.
+
+    Auto-bumps the counterpart when the pick would collide, keeping
+    warn < crit. Pure so the click-path logic is testable — the actions
+    must read the current pair BEFORE writing (a write invalidates the
+    stored pair and the validating accessors snap to defaults).
+    """
+    if kind == "warn":
+        crit = (cur_crit if v < cur_crit
+                else next((c for c in CRIT_CHOICES if c > v), CRIT_CHOICES[-1]))
+        return v, crit
+    warn = (cur_warn if v > cur_warn
+            else next((w for w in reversed(WARN_CHOICES) if w < v),
+                      WARN_CHOICES[0]))
+    return warn, v
 
 
 def set_warn_threshold(v):
@@ -1103,25 +1122,20 @@ class _SettingsController(NSObject):
     def pickWarn_(self, sender):
         idx = sender.indexOfSelectedItem()
         if 0 <= idx < len(WARN_CHOICES):
-            v = WARN_CHOICES[idx]
-            set_warn_threshold(v)
-            if v >= crit_threshold():
-                # keep the pair valid (0.7 warn vs 0.7 crit) — bump crit up
-                set_crit_threshold(next((c for c in CRIT_CHOICES if c > v),
-                                        CRIT_CHOICES[-1]))
+            new_warn, new_crit = resolve_threshold_pick(
+                "warn", WARN_CHOICES[idx], warn_threshold(), crit_threshold())
+            set_warn_threshold(new_warn)
+            set_crit_threshold(new_crit)
         self.refreshStates()
         self._refresh_app()
 
     def pickCrit_(self, sender):
         idx = sender.indexOfSelectedItem()
         if 0 <= idx < len(CRIT_CHOICES):
-            v = CRIT_CHOICES[idx]
-            set_crit_threshold(v)
-            if v <= warn_threshold():
-                # mirror guard: drop warn below the new crit
-                set_warn_threshold(next(
-                    (w for w in reversed(WARN_CHOICES) if w < v),
-                    WARN_CHOICES[0]))
+            new_warn, new_crit = resolve_threshold_pick(
+                "crit", CRIT_CHOICES[idx], warn_threshold(), crit_threshold())
+            set_warn_threshold(new_warn)
+            set_crit_threshold(new_crit)
         self.refreshStates()
         self._refresh_app()
 
