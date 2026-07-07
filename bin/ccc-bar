@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""ccc-bar — Claude + Codex usage in the macOS menu bar.
+"""ccc-bar — Claude, Codex, Cursor, and Gemini usage in the macOS menu bar.
 
 Zero setup: if you use Claude Code, the app reads its existing OAuth token from
 your Keychain and makes one tiny probe call to read Anthropic's real
 `anthropic-ratelimit-unified-*` headers (5h/7d utilization). Nothing to sign
-into.
+into. Cursor and Gemini CLI are auto-detected the same way — no toggling
+needed on a fresh install.
 
-One menu-bar status item shows every enabled provider's glyph + 5h% pair,
-side by side with a uniform gap between them; when a provider is hidden in
-Settings its pair drops out of the title, and if every provider is hidden
-the item falls back to the template terminal icon as a reachability anchor.
-A shared dropdown shows color-coded progress bars and the 5h reset countdown
-for each enabled provider. A normal, quittable app — reopen via
-Spotlight/Applications, `open -a "Claude Usage"`, or the `ccc` CLI.
+One menu-bar status item shows every detected, enabled provider's glyph +
+value pair, side by side with a uniform gap between them; when a provider is
+hidden in Settings or not detected on this machine, its pair drops out of the
+title, and if every provider is hidden/undetected the item falls back to the
+template terminal icon as a reachability anchor. A shared dropdown shows
+color-coded progress bars and reset countdowns for each enabled provider.
+A normal, quittable app — reopen via Spotlight/Applications,
+`open -a "Claude Usage"`, or the `ccc` CLI.
 """
 import importlib.machinery
 import importlib.util
@@ -50,14 +52,22 @@ RESET7_KEY = "anthropic-ratelimit-unified-7d-reset"
 
 GLYPH_CLAUDE = os.path.expanduser("~/.config/ccc/claude-glyph.png")
 GLYPH_CODEX = os.path.expanduser("~/.config/ccc/codex-glyph.png")
+GLYPH_CURSOR = os.path.expanduser("~/.config/ccc/cursor-glyph.png")
+GLYPH_GEMINI = os.path.expanduser("~/.config/ccc/gemini-glyph.png")
 
 
-def _load_ccc_codex():
-    """ccc-codex sits next to this file (repo bin/ or ~/.local/bin)."""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccc-codex")
+def _load_helper(name):
+    """Load a same-directory stdlib helper module (repo bin/ or ~/.local/bin).
+
+    `name` is the file's own name (e.g. "ccc-codex"); the module name used for
+    sys.modules bookkeeping is that with dashes stripped ("ccccodex"), same
+    convention as the original ccc-codex-only loader this generalizes.
+    """
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
     try:
-        loader = importlib.machinery.SourceFileLoader("ccccodex", p)
-        spec = importlib.util.spec_from_loader("ccccodex", loader)
+        modname = name.replace("-", "")
+        loader = importlib.machinery.SourceFileLoader(modname, p)
+        spec = importlib.util.spec_from_loader(modname, loader)
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
         return mod
@@ -65,12 +75,25 @@ def _load_ccc_codex():
         return None
 
 
-_CODEX = _load_ccc_codex()
+_CODEX = _load_helper("ccc-codex")
+_CURSOR = _load_helper("ccc-cursor")
+_GEMINI = _load_helper("ccc-gemini")
 
 DEFAULTS_SUITE = "com.claude-usage-bar"
 SELFHEAL_KEY = "selfHeal"
 SHOW_CLAUDE_KEY = "showClaude"
 SHOW_CODEX_KEY = "showCodex"
+SHOW_CURSOR_KEY = "showCursor"
+SHOW_GEMINI_KEY = "showGemini"
+GEMINI_CAP_KEY = "geminiDailyCap"
+DEFAULT_GEMINI_CAP = 1000
+# (label, daily request cap) — order is the Settings ▸ Gemini plan submenu order.
+GEMINI_PLANS = (
+    ("Free — 1000/day", 1000),
+    ("AI Pro — 1500/day", 1500),
+    ("AI Ultra — 2000/day", 2000),
+    ("API key — 250/day", 250),
+)
 
 # NSStatusItem autosave name. macOS persists the named item's menu-bar
 # position under "NSStatusItem Preferred Position <name>" in
@@ -101,12 +124,25 @@ def set_self_heal(on):
 def provider_enabled(key):
     d = _defaults()
     if d.objectForKey_(key) is None:
-        return True  # both providers default ON
+        return True  # all providers default ON
     return bool(d.boolForKey_(key))
 
 
 def set_provider_enabled(key, on):
     _defaults().setBool_forKey_(bool(on), key)
+
+
+def gemini_cap():
+    """Daily request cap used to compute Gemini's u5 fraction (default 1000)."""
+    d = _defaults()
+    if d.objectForKey_(GEMINI_CAP_KEY) is None:
+        return DEFAULT_GEMINI_CAP
+    n = int(d.integerForKey_(GEMINI_CAP_KEY))
+    return n if n > 0 else DEFAULT_GEMINI_CAP
+
+
+def set_gemini_cap(n):
+    _defaults().setInteger_forKey_(int(n), GEMINI_CAP_KEY)
 
 
 # ---------------------------------------------------------------- claude code
@@ -207,10 +243,35 @@ def codex_usage():
         return {"state": "no_data"}
 
 
-# Ordered: (record key, defaults key, glyph path, fetcher, text fallback)
+def cursor_usage():
+    if _CURSOR is None:
+        return {"state": "no_data"}
+    try:
+        return _CURSOR.cursor_usage()
+    except Exception:
+        return {"state": "no_data"}
+
+
+def gemini_usage():
+    if _GEMINI is None:
+        return {"state": "no_data"}
+    try:
+        return _GEMINI.gemini_usage(cap=gemini_cap())
+    except Exception:
+        return {"state": "no_data"}
+
+
+# Ordered: (record key, defaults key, glyph path, fetcher, text fallback,
+#           window labels (label5, label7 or None), detect())
 PROVIDERS = (
-    ("claude", SHOW_CLAUDE_KEY, GLYPH_CLAUDE, claude_usage, "C:"),
-    ("codex", SHOW_CODEX_KEY, GLYPH_CODEX, codex_usage, "X:"),
+    ("claude", SHOW_CLAUDE_KEY, GLYPH_CLAUDE, claude_usage, "C:",
+     ("5h", "7d"), lambda: claude_code_creds() is not None),
+    ("codex", SHOW_CODEX_KEY, GLYPH_CODEX, codex_usage, "X:",
+     ("5h", "7d"), lambda: os.path.isdir(os.path.expanduser("~/.codex/sessions"))),
+    ("cursor", SHOW_CURSOR_KEY, GLYPH_CURSOR, cursor_usage, "R:",
+     ("month", None), lambda: _CURSOR is not None and _CURSOR.cursor_detected()),
+    ("gemini", SHOW_GEMINI_KEY, GLYPH_GEMINI, gemini_usage, "G:",
+     ("day", None), lambda: _GEMINI is not None and _GEMINI.gemini_detected()),
 )
 
 
@@ -291,6 +352,32 @@ def info_row(text):
     return _seg(text, NSColor.secondaryLabelColor(), 11, W_REG)
 
 
+# Per-provider, per-state dropdown copy for non-"ok" records. Keyed by the
+# lowercased PROVIDERS record key so e.g. codex's "no_data" wording ("no
+# sessions found") doesn't leak onto cursor/gemini's own "no_data" cases.
+_STATE_MESSAGES = {
+    "claude": {
+        "no_login": "  No Claude Code login found — open Claude Code",
+        "expired": "  Login expired — open Claude Code to refresh",
+    },
+    "codex": {
+        "no_data": "  No Codex sessions found — run codex once",
+    },
+    "cursor": {
+        "expired": "  Cursor login expired — open Cursor to refresh",
+        "no_data": "  No Cursor usage data available",
+    },
+    "gemini": {
+        "no_data": "  No Gemini sessions found — run gemini once",
+    },
+}
+
+
+def _state_message(key, state):
+    return _STATE_MESSAGES.get(key, {}).get(
+        state, "  Couldn't read usage — try again shortly")
+
+
 _GLYPH_CACHE = {}
 _TINTED_CACHE = {}
 
@@ -346,6 +433,8 @@ def _menu_bar_dark(button):
 
 def _title_value(rec):
     if rec["state"] == "ok":
+        if rec.get("estimated"):
+            return f"est. {pct(rec.get('u5'))}"
         return pct(rec.get("u5"))
     return "⚠" if rec["state"] in ("expired", "error") else "–"
 
@@ -457,9 +546,19 @@ class CCCBar(rumps.App):
         show_x = rumps.MenuItem("Show Codex",
                                 callback=lambda s: self._toggle_provider(s, SHOW_CODEX_KEY))
         show_x.state = 1 if provider_enabled(SHOW_CODEX_KEY) else 0
+        show_r = rumps.MenuItem("Show Cursor",
+                                callback=lambda s: self._toggle_provider(s, SHOW_CURSOR_KEY))
+        show_r.state = 1 if provider_enabled(SHOW_CURSOR_KEY) else 0
+        show_g = rumps.MenuItem("Show Gemini",
+                                callback=lambda s: self._toggle_provider(s, SHOW_GEMINI_KEY))
+        show_g.state = 1 if provider_enabled(SHOW_GEMINI_KEY) else 0
+        gemini_plan = rumps.MenuItem("Gemini plan")
+        current_cap = gemini_cap()
+        gemini_plan.update([self._gemini_plan_item(label, cap, current_cap)
+                            for label, cap in GEMINI_PLANS])
         heal = rumps.MenuItem("Auto-restore icon", callback=self.toggle_self_heal)
         heal.state = 1 if self_heal_enabled() else 0
-        settings.update([show_c, show_x, heal])
+        settings.update([show_c, show_x, show_r, show_g, gemini_plan, heal])
         return [
             None,
             rumps.MenuItem("Refresh now", callback=self.refresh),
@@ -521,11 +620,18 @@ class CCCBar(rumps.App):
 
     def _refresh_worker(self):
         try:
-            # Fetch only enabled providers — a hidden Claude means no probe
-            # call at all (saves the token + the rate-limit ping).
+            # Detect once per tick, then fetch only providers that are BOTH
+            # detected on this machine AND enabled in Settings — an
+            # undetected/hidden provider costs no probe at all. A provider
+            # missing from `data` is simply absent from the title and the
+            # dropdown, so detection and display can't disagree.
             data = {}
-            for key, setting, _glyph_path, fetcher, _fb in PROVIDERS:
-                if provider_enabled(setting):
+            for key, setting, _glyph_path, fetcher, _fb, _labels, detect in PROVIDERS:
+                try:
+                    detected = bool(detect())
+                except Exception:
+                    detected = False
+                if detected and provider_enabled(setting):
                     data[key] = fetcher()
         finally:
             self._refreshing = False
@@ -543,7 +649,7 @@ class CCCBar(rumps.App):
             except Exception:
                 pass
         rebuild = self._rebuild_menu_next
-        entries = [(g, fb, data[k]) for k, s, g, fetch_, fb in PROVIDERS
+        entries = [(g, fb, data[k]) for k, s, g, fetch_, fb, _labels, _d in PROVIDERS
                    if k in data]
         if not entries:
             # No providers enabled: show the app icon so the item stays
@@ -569,44 +675,50 @@ class CCCBar(rumps.App):
             self._refresh_again = False
             self.refresh(None)
 
-    def _section_rows(self, name, rec):
+    def _section_rows(self, name, rec, labels):
         rows = []
         head = name + (f" · {rec['plan']}" if rec.get("plan") else "")
         as_of = rec.get("as_of")
         if as_of and time.time() - as_of > REFRESH_SECONDS:
             head += f"   · as of {_age(as_of)} ago"
+        if rec.get("stale"):
+            head += " · cached"
         rows.append(self._attr_item(name + "_hdr", info_row(head)))
         state = rec["state"]
         if state == "ok":
-            rows.append(self._attr_item(name + "_5h", bar_row(rec.get("u5"), "  5h", "", True)))
-            rows.append(self._attr_item(name + "_7d", bar_row(rec.get("u7"), "  7d", "", True)))
+            label5, label7 = labels
+            if label5 is not None:
+                rows.append(self._attr_item(
+                    name + "_5h", bar_row(rec.get("u5"), f"  {label5}", "", True)))
+            if label7 is not None:
+                rows.append(self._attr_item(
+                    name + "_7d", bar_row(rec.get("u7"), f"  {label7}", "", True)))
             resets = []
-            if rec.get("r5"):
-                resets.append(f"5h in {countdown(rec['r5'])}")
-            if rec.get("r7"):
-                resets.append(f"7d in {countdown(rec['r7'])}")
+            if label5 is not None and rec.get("r5"):
+                resets.append(f"{label5} resets in {countdown(rec['r5'])}")
+            if label7 is not None and rec.get("r7"):
+                resets.append(f"{label7} resets in {countdown(rec['r7'])}")
             if resets:
                 rows.append(self._attr_item(name + "_rst",
-                                            info_row("  resets " + " · ".join(resets))))
+                                            info_row("  " + " · ".join(resets))))
+            if rec.get("estimated"):
+                rows.append(self._attr_item(
+                    name + "_est", info_row("  estimated from local session logs")))
         else:
-            msg = {
-                "no_login": "  No Claude Code login found — open Claude Code",
-                "expired": "  Login expired — open Claude Code to refresh",
-                "no_data": "  No Codex sessions found — run codex once",
-            }.get(state, "  Couldn't read usage — try again shortly")
-            rows.append(self._attr_item(name + "_err", info_row(msg)))
+            rows.append(self._attr_item(
+                name + "_err", info_row(_state_message(name.lower(), state))))
         return rows
 
     def _show(self, data):
         items = [self._attr_item("hdr", info_row("usage")), None]
         first = True
-        for key, setting, _g, _f, _fb in PROVIDERS:
+        for key, setting, _g, _f, _fb, labels, _detect in PROVIDERS:
             if key not in data:
                 continue
             if not first:
                 items.append(None)
             first = False
-            items += self._section_rows(key.title(), data[key])
+            items += self._section_rows(key.title(), data[key], labels)
         if first:  # nothing enabled
             items.append(self._attr_item("none", info_row("All providers hidden — Settings ▸")))
         items += self._menu_tail()
@@ -625,6 +737,20 @@ class CCCBar(rumps.App):
         set_provider_enabled(key, new)
         sender.state = 1 if new else 0
         self.refresh(None)  # repaint title + dropdown immediately
+
+    def _gemini_plan_item(self, label, cap, current_cap):
+        item = rumps.MenuItem(label, callback=self._pick_gemini_cap)
+        item.state = 1 if cap == current_cap else 0
+        return item
+
+    def _pick_gemini_cap(self, sender):
+        for label, cap in GEMINI_PLANS:
+            if label == sender.title:
+                set_gemini_cap(cap)
+                break
+        # Rebuild the dropdown so the picked item's checkmark (and every
+        # other plan item's) reflects the new selection immediately.
+        self.refresh(None)
 
     def open_terminal(self, _):
         subprocess.Popen(
