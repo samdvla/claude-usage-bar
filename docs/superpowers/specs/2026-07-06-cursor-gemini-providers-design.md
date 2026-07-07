@@ -122,6 +122,29 @@ place). Order: claude, codex, cursor, gemini.
   only), deployed immediately so Sam validates the look before the new
   providers land on top of it.
 
+## 5b. In-bar reset countdown (user pick 2026-07-06: mockup variation C)
+
+Dropdown/flyout bars become drawn bars with the reset countdown INSIDE the
+track, adaptive battery-style; the separate per-section "resets …" line is
+removed (one line saved per provider).
+
+- **Adaptive placement rule:** if the filled region is wide enough to hold
+  the countdown text + 14 px padding, draw it INSIDE the fill, right-aligned
+  at the fill's edge, dark text (`#1A1A1E` at ~72 % opacity, semibold);
+  otherwise draw it right-aligned in the EMPTY region, secondary-label
+  color. Countdown text: existing `countdown()` formatting (`2h 41m`,
+  `5d 8h`, `52m` when under an hour).
+- **macOS:** dropdown rows move from text-glyph bars (█░ attributed
+  strings) to custom NSViews via `NSMenuItem.setView_` — rounded-rect track
+  (~17 pt tall, 5 pt radius), health-color fill (existing thresholds),
+  window label left, `NN%` right-aligned OUTSIDE the bar in the health
+  color (mockup C layout). Estimated providers show `est. NN%` outside and
+  keep the footnote row. Rows are non-interactive (no highlight needed).
+- **Windows:** `BarControl` (already a drawn control) gains the same
+  adaptive in-bar countdown; flyout reset labels are removed (section =
+  header + bars + optional footnote).
+- Reference mockup: `.superpowers/sdd/bar-mockups.html` variation C.
+
 ## 6. Windows UI generalization
 
 - `TrayController`: per-provider slot list (icon + last record + visibility

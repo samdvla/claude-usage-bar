@@ -125,6 +125,16 @@
 
 ---
 
+### Task 5b: macOS in-bar countdown rows (spec §5b, mockup variation C)
+
+**Files:** Modify `bin/ccc-bar`.
+
+**Interfaces consumed:** provider records + labels from Task 5; `countdown()`, `health_color()`, tint/appearance helpers.
+
+- [ ] **Step 1: BarRowView.** Add an NSView subclass (PyObjC) drawing one bar row: window label (left, 22 pt column), rounded track (5 pt radius, `NSColor.quaternaryLabelColor()` fill or #3A3A3E-equivalent via dynamic color), health-color fill rect (existing thresholds via `health_color`), countdown text via the ADAPTIVE rule (inside fill right-aligned, `#1A1A1E` @ 0.72 alpha semibold 11 pt, when fill_width >= text_width + 14; else right-aligned in empty region, `NSColor.secondaryLabelColor()` 11 pt), percent text OUTSIDE right in the health color (semibold, monospacedDigit; `est. NN%` for estimated records). Size: ~(280, 26) per row; `drawRect_` implementation; all drawing main-thread (rows are built in `_show`, which runs in `_apply` via callAfter — already main thread).
+- [ ] **Step 2: wire into `_section_rows`.** Replace `bar_row(...)` attributed-string items with `rumps.MenuItem` whose `_menuitem.setView_(BarRowView(...))`; DELETE the per-section resets `info_row` line (countdown now lives in the bars). Keep header rows + estimated footnote as attributed strings. Keep `bar_row` itself only if still referenced elsewhere — if nothing references it, delete it and `BAR_WIDTH`.
+- [ ] **Step 3:** pytest full suite (module-exec gate) + deploy + screenshot of the OPEN dropdown if feasible (screencapture of menu open is tricky — at minimum deploy and ask Sam to eyeball). Commit `feat(ccc-bar): drawn bar rows with adaptive in-bar reset countdown (variation C)`.
+
 ### Task 6: bash `ccc` sections
 
 **Files:** Modify `bin/ccc`.
@@ -172,7 +182,8 @@
 
 **Files:** Modify `windows/src/TrayApp/FlyoutForm.cs`.
 
-- [ ] Replace hardcoded Claude/Codex controls with a `ProviderSection` control group (header label, up to 2 BarControls with label text from provider window labels, reset label, footnote label) built per provider at construct time; `Render(IReadOnlyList<RateUsage> records)` shows sections for the passed records in order, hides the rest, and sets `Height = 44 + visibleSections * sectionHeight + footer` (compute from actual control heights — kills the fixed-320 dead space). Estimated sections show `est.` in the bar % and footnote "estimated from local session logs". TrayController passes detected+shown records. Commit `feat(windows-tray): dynamic per-provider flyout sections`.
+- [ ] Replace hardcoded Claude/Codex controls with a `ProviderSection` control group (header label, up to 2 BarControls with label text from provider window labels, footnote label — NO reset labels, see next bullet) built per provider at construct time; `Render(IReadOnlyList<RateUsage> records)` shows sections for the passed records in order, hides the rest, and sets `Height = 44 + visibleSections * sectionHeight + footer` (compute from actual control heights — kills the fixed-320 dead space). Estimated sections show `est.` in the bar % and footnote "estimated from local session logs". TrayController passes detected+shown records. Commit `feat(windows-tray): dynamic per-provider flyout sections`.
+- [ ] **In-bar countdown (spec §5b):** `BarControl` gains a `ResetText` string property; in its `OnPaint`, draw it with the adaptive rule — inside the fill right-aligned (color `#1A1A1E` at 72% alpha, bold, 8.5pt) when fillWidth >= textWidth + 14px, else right-aligned in the empty region (theme.Secondary). Reset label rows are removed from the flyout entirely. Same commit.
 
 ---
 
