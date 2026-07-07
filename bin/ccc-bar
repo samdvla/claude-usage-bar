@@ -49,22 +49,29 @@ SEGMENT_GAP = "   "  # uniform gap between provider segments in the title
 # Drawn dropdown bar row (mockup variation C, spec 2026-07-06 §5b). All values
 # are the row's own view-local coordinates; the view is flipped (see
 # BarRowView.isFlipped) so y grows downward from the row's top edge.
-BAR_ROW_W = 250   # narrowed from 300 (Sam 2026-07-06): compactness is the point
-BAR_ROW_H = 26
-# Track start: the label column's widest possible value is "month" (the
-# longest of the fixed label set 5h/7d/month/day), which measures ~37pt at
-# 12pt semibold — verified directly with NSAttributedString.size() during
-# development, since a naive ~30pt guess clipped it into "montl". 2pt left
-# inset + ~37pt text + ~5pt breathing room before the track.
+# Leading content inset (layout-polish round, Sam 2026-07-07): custom
+# NSMenuItem views don't get the leading inset native items get — native menu
+# text starts ~21pt from the menu's left edge while the custom view's origin
+# sits at ~+6pt, so the row's own content shifts right by this to optically
+# align the window labels with the native rows (6 + 13 + 2pt label inset = 21).
+# The row grows by the same amount so all track/% metrics stay identical.
+BAR_LEFT_INSET = 13.0
+BAR_ROW_W = 250 + BAR_LEFT_INSET  # 250 content (Sam: compactness) + inset
+BAR_ROW_H = 28    # 26 + 2pt air between bars (layout-polish round)
+# Track start (relative to BAR_LEFT_INSET): the label column's widest value is
+# "month" (longest of the fixed label set 5h/7d/month/day), ~37pt at 12pt
+# semibold — verified with NSAttributedString.size() during development, since
+# a naive ~30pt guess clipped it into "montl". 2pt label inset + ~37pt text +
+# ~5pt breathing room before the track.
 BAR_TRACK_X = 44
 # % column: must fit the widest possible value, "est. 100%" (or "est. 120%"
 # for an over-cap Gemini estimate), ~56.6pt at 11pt monospacedDigit semibold —
-# 68 minus BAR_PCT_GAP and BAR_RIGHT_PAD leaves a 58pt text region.
-BAR_TRACK_RIGHT_MARGIN = 68  # track ends at (width - this); rest is the % column
+# 72 minus BAR_PCT_GAP and BAR_RIGHT_PAD leaves a 58pt text region.
+BAR_TRACK_RIGHT_MARGIN = 72  # track ends at (width - this); rest is the % column
 BAR_TRACK_H = 17
 BAR_TRACK_RADIUS = 3.0    # near-rectangular with slight rounding (revised §5b)
 BAR_PCT_GAP = 4           # gap between track's right edge and the % text region
-BAR_RIGHT_PAD = 6         # inset from the view's right edge to the % text
+BAR_RIGHT_PAD = 10        # inset from the view's right edge to the % text
 BAR_INFILL_INSET = 10     # inset from an edge (fill or track) for countdown text
 BAR_INFILL_PADDING = 20   # adaptive rule: fill must be >= text width + this
 # Adaptive rule, second gate: countdown only goes INSIDE the fill when
@@ -427,24 +434,30 @@ class BarRowView(NSView):
         u = max(0.0, min(1.0, f(self._util) or 0.0))
         hc = health_color(self._util)
 
+        # All x positions start BAR_LEFT_INSET in from the view's left edge
+        # so the row content optically aligns with native menu items (custom
+        # NSMenuItem views don't get the native leading content inset).
+        track_x = BAR_LEFT_INSET + BAR_TRACK_X
+
         # -- label (left column) --------------------------------------
         label_font = NSFont.monospacedSystemFontOfSize_weight_(12, W_SEMI)
         label_str = _seg_font(self._label_text, NSColor.labelColor(), label_font)
         label_size = label_str.size()
-        label_str.drawAtPoint_(NSMakePoint(2, self._center_y(h, label_size.height)))
+        label_str.drawAtPoint_(NSMakePoint(
+            BAR_LEFT_INSET + 2, self._center_y(h, label_size.height)))
 
         # -- track: near-black, near-rectangular (3pt radius) rect — the
         #    backdrop the ░-style dot grid sits on (revised §5b) -----------
-        track_w = max(0.0, w - BAR_TRACK_RIGHT_MARGIN - BAR_TRACK_X)
+        track_w = max(0.0, w - BAR_TRACK_RIGHT_MARGIN - track_x)
         track_y = self._center_y(h, BAR_TRACK_H)
-        track_rect = NSMakeRect(BAR_TRACK_X, track_y, track_w, BAR_TRACK_H)
+        track_rect = NSMakeRect(track_x, track_y, track_w, BAR_TRACK_H)
         track_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             track_rect, BAR_TRACK_RADIUS, BAR_TRACK_RADIUS)
         NSColor.blackColor().colorWithAlphaComponent_(BAR_TRACK_ALPHA).set()
         track_path.fill()
 
         fill_w = round(track_w * u)
-        fill_right = BAR_TRACK_X + fill_w
+        fill_right = track_x + fill_w
         ctx = NSGraphicsContext.currentContext()
 
         # -- dot grid in the EMPTY region only (the old ░ shading):
@@ -456,8 +469,8 @@ class BarRowView(NSView):
         n_rows = int((BAR_TRACK_H - BAR_DOT_D) // BAR_DOT_PITCH) + 1
         grid_h = (n_rows - 1) * BAR_DOT_PITCH + BAR_DOT_D
         dot_y0 = track_y + (BAR_TRACK_H - grid_h) / 2.0
-        x = BAR_TRACK_X + BAR_DOT_PITCH / 2.0
-        x_end = BAR_TRACK_X + track_w - BAR_DOT_D
+        x = track_x + BAR_DOT_PITCH / 2.0
+        x_end = track_x + track_w - BAR_DOT_D
         while x <= x_end:
             if x >= fill_right + 1.0:  # dots never under the fill
                 for r in range(n_rows):
@@ -471,7 +484,7 @@ class BarRowView(NSView):
         #    segment separators). Left corners follow the track radius via
         #    the clip; the right edge stays straight ----------------------
         if fill_w > 0:
-            fill_rect = NSMakeRect(BAR_TRACK_X, track_y, fill_w, BAR_TRACK_H)
+            fill_rect = NSMakeRect(track_x, track_y, fill_w, BAR_TRACK_H)
             ctx.saveGraphicsState()
             track_path.addClip()
             hc.set()
@@ -514,7 +527,7 @@ class BarRowView(NSView):
                 and fill_w >= cd_size.width + BAR_INFILL_PADDING):
             # Fits inside the fill: dark semibold text, right-aligned at the
             # fill's own right edge (battery-style).
-            x = BAR_TRACK_X + fill_w - BAR_INFILL_INSET - cd_size.width
+            x = track_x + fill_w - BAR_INFILL_INSET - cd_size.width
             infill_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
         else:
             # Falls back to the empty region, right-aligned, secondary color.
@@ -522,8 +535,8 @@ class BarRowView(NSView):
             outside_str = _seg_font(cd_text, NSColor.secondaryLabelColor(),
                                     outside_font)
             cd_size = outside_str.size()
-            empty_left = BAR_TRACK_X + fill_w
-            empty_right = BAR_TRACK_X + track_w
+            empty_left = track_x + fill_w
+            empty_right = track_x + track_w
             x = max(empty_left, empty_right - BAR_INFILL_INSET - cd_size.width)
             outside_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
 
