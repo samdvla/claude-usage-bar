@@ -142,12 +142,19 @@ removed (one line saved per provider).
   otherwise draw it right-aligned in the EMPTY region, secondary-label
   color. Countdown text: existing `countdown()` formatting (`2h 41m`,
   `5d 8h`, `52m` when under an hour).
-- **macOS:** dropdown rows move from text-glyph bars (█░ attributed
-  strings) to custom NSViews via `NSMenuItem.setView_` — rounded-rect track
-  (~17 pt tall, 5 pt radius), health-color fill (existing thresholds),
-  window label left, `NN%` right-aligned OUTSIDE the bar in the health
-  color (mockup C layout). Estimated providers show `est. NN%` outside and
-  keep the footnote row. Rows are non-interactive (no highlight needed).
+- **macOS (visual style revised 2026-07-06 per Sam's live feedback):**
+  dropdown rows are custom NSViews via `NSMenuItem.setView_`, but the bar
+  reproduces the ORIGINAL dotted text-bar aesthetic, not smooth rounded
+  bars: track = near-black rect (3 pt radius) textured with a dot grid
+  (~1.5 pt dots at ~4.5 pt pitch, dim ~30 %-white) exactly like the old
+  `░` region; fill = health-color block with faint vertical segment
+  separators every ~8 pt (slightly darker shade) like the old `█` runs;
+  window label left, `NN%` right-aligned OUTSIDE in the health color.
+  Countdown placement keeps the design-C adaptive rule (inside fill when
+  ≥50 % and it fits, else in the dotted region). Estimated providers show
+  `est. NN%` outside and keep the footnote row. Rows non-interactive.
+  Acceptance = side-by-side render match against Sam's original dropdown
+  screenshot texture, verified by the controller before deploy.
 - **Windows:** `BarControl` (already a drawn control) gains the same
   adaptive in-bar countdown; flyout reset labels are removed (section =
   header + bars + optional footnote).
