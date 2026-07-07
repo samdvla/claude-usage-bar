@@ -28,12 +28,14 @@ import urllib.request
 
 import objc
 import rumps
-from AppKit import (NSApplication, NSBezierPath, NSColor,
+from AppKit import (NSApplication, NSBezierPath, NSButton, NSColor,
+                    NSColorPanel, NSColorSpace, NSColorWell,
                     NSCompositingOperationSourceAtop, NSFont,
                     NSFontAttributeName, NSForegroundColorAttributeName,
-                    NSGraphicsContext, NSImage, NSRectFill,
-                    NSRectFillUsingOperation, NSStatusBar, NSTextAttachment,
-                    NSView)
+                    NSGraphicsContext, NSImage, NSImageView,
+                    NSLayoutConstraint, NSPopUpButton, NSRectFill,
+                    NSRectFillUsingOperation, NSStackView, NSStatusBar,
+                    NSTextAttachment, NSTextField, NSView, NSWindow)
 from Foundation import (NSDistributedNotificationCenter, NSMakePoint,
                         NSMakeRect, NSMakeSize, NSMutableAttributedString,
                         NSAttributedString, NSObject, NSUserDefaults)
@@ -140,6 +142,21 @@ SHOW_CURSOR_KEY = "showCursor"
 SHOW_GEMINI_KEY = "showGemini"
 GEMINI_CAP_KEY = "geminiDailyCap"
 DEFAULT_GEMINI_CAP = 1000
+# Settings window (spec §5c): menu-bar display mode + custom health colors
+# and thresholds. Colors are stored as "r,g,b" float strings (sRGB); absent
+# keys mean system colors and the 0.5/0.8 thresholds — exactly the pre-§5c
+# behavior.
+DISPLAY_MODE_KEY = "displayMode"      # "full" (glyph + percent) | "glyph"
+HEALTH_GREEN_KEY = "healthGreen"
+HEALTH_ORANGE_KEY = "healthOrange"
+HEALTH_RED_KEY = "healthRed"
+WARN_THRESHOLD_KEY = "warnThreshold"
+CRIT_THRESHOLD_KEY = "critThreshold"
+DEFAULT_WARN, DEFAULT_CRIT = 0.5, 0.8
+BAR_SETTINGS_KEYS = (HEALTH_GREEN_KEY, HEALTH_ORANGE_KEY, HEALTH_RED_KEY,
+                     WARN_THRESHOLD_KEY, CRIT_THRESHOLD_KEY)
+WARN_CHOICES = (0.3, 0.4, 0.5, 0.6, 0.7)
+CRIT_CHOICES = (0.7, 0.8, 0.9, 0.95)
 # (label, daily request cap) — order is the Settings ▸ Gemini plan submenu order.
 GEMINI_PLANS = (
     ("Free — 1000/day", 1000),
@@ -196,6 +213,89 @@ def gemini_cap():
 
 def set_gemini_cap(n):
     _defaults().setInteger_forKey_(int(n), GEMINI_CAP_KEY)
+
+
+def display_mode():
+    """Menu-bar rendering mode: "full" (glyph + percent, default) | "glyph"."""
+    v = _defaults().stringForKey_(DISPLAY_MODE_KEY)
+    return "glyph" if v == "glyph" else "full"
+
+
+def set_display_mode(mode):
+    _defaults().setObject_forKey_(
+        "glyph" if mode == "glyph" else "full", DISPLAY_MODE_KEY)
+
+
+def health_custom_color(key):
+    """NSColor parsed from a stored "r,g,b" float string, or None.
+
+    None (absent key, malformed string, wrong arity, out-of-range component)
+    means "use the system color" — the caller owns the fallback.
+    """
+    v = _defaults().stringForKey_(key)
+    if not v:
+        return None
+    try:
+        parts = [float(p) for p in str(v).split(",")]
+    except (TypeError, ValueError):
+        return None
+    if len(parts) != 3 or not all(0.0 <= p <= 1.0 for p in parts):
+        return None
+    return NSColor.colorWithSRGBRed_green_blue_alpha_(*parts, 1.0)
+
+
+def set_health_color(key, nscolor):
+    """Persist an NSColor as an "r,g,b" sRGB float string under `key`."""
+    try:
+        c = nscolor.colorUsingColorSpace_(NSColorSpace.sRGBColorSpace())
+        if c is None:
+            return
+        _defaults().setObject_forKey_(
+            f"{c.redComponent()},{c.greenComponent()},{c.blueComponent()}", key)
+    except Exception:
+        pass  # un-convertible color (e.g. pattern) — keep the stored value
+
+
+def _thresholds():
+    """(warn, crit) floats; any invalid pair degrades to (0.5, 0.8).
+
+    Valid means 0 < warn < crit <= 1 — the pair is validated together, so a
+    stored warn of 0.9 next to a crit of 0.8 can't invert the scale.
+    """
+    d = _defaults()
+    try:
+        wv = d.objectForKey_(WARN_THRESHOLD_KEY)
+        cv = d.objectForKey_(CRIT_THRESHOLD_KEY)
+        warn = float(wv) if wv is not None else DEFAULT_WARN
+        crit = float(cv) if cv is not None else DEFAULT_CRIT
+    except (TypeError, ValueError):
+        return DEFAULT_WARN, DEFAULT_CRIT
+    if not (0.0 < warn < crit <= 1.0):
+        return DEFAULT_WARN, DEFAULT_CRIT
+    return warn, crit
+
+
+def warn_threshold():
+    return _thresholds()[0]
+
+
+def crit_threshold():
+    return _thresholds()[1]
+
+
+def set_warn_threshold(v):
+    _defaults().setObject_forKey_(float(v), WARN_THRESHOLD_KEY)
+
+
+def set_crit_threshold(v):
+    _defaults().setObject_forKey_(float(v), CRIT_THRESHOLD_KEY)
+
+
+def reset_bar_defaults():
+    """Remove the three color keys + both thresholds (back to system look)."""
+    d = _defaults()
+    for key in BAR_SETTINGS_KEYS:
+        d.removeObjectForKey_(key)
 
 
 # ---------------------------------------------------------------- claude code
@@ -358,12 +458,20 @@ def pct(util):
 
 
 def health_color(util):
+    """Health color for a utilization, honoring §5c custom colors/thresholds.
+
+    Resolved per call: NSUserDefaults reads are memory-cached by the
+    framework and a full dropdown rebuild makes ~a dozen of them, so a
+    per-refresh cache would buy nothing measurable.
+    """
     u = f(util) or 0.0
-    if u >= 0.8:
-        return NSColor.systemRedColor()
-    if u >= 0.5:
-        return NSColor.systemOrangeColor()
-    return NSColor.systemGreenColor()
+    warn, crit = _thresholds()
+    if u >= crit:
+        return health_custom_color(HEALTH_RED_KEY) or NSColor.systemRedColor()
+    if u >= warn:
+        return (health_custom_color(HEALTH_ORANGE_KEY)
+                or NSColor.systemOrangeColor())
+    return health_custom_color(HEALTH_GREEN_KEY) or NSColor.systemGreenColor()
 
 
 def countdown(ts):
@@ -666,13 +774,15 @@ def title_attr_string(entries, button):
     the menu bar — no SF Mono width jitter).
     """
     dark = _menu_bar_dark(button)
+    glyph_only = display_mode() == "glyph"
     size = NSFont.menuBarFontOfSize_(0).pointSize()
     font = NSFont.monospacedDigitSystemFontOfSize_weight_(size, W_REG)
     color = NSColor.labelColor()
     s = NSMutableAttributedString.alloc().init()
     for i, (glyph_path, fallback, rec) in enumerate(entries):
         if i:
-            s.appendAttributedString_(_seg_font(SEGMENT_GAP, color, font))
+            s.appendAttributedString_(_seg_font(
+                "  " if glyph_only else SEGMENT_GAP, color, font))
         img = _tinted_glyph(glyph_path, dark)
         if img is not None:
             att = NSTextAttachment.alloc().init()
@@ -680,9 +790,14 @@ def title_attr_string(entries, button):
             att.setBounds_(NSMakeRect(0, -3, 15, 15))
             s.appendAttributedString_(
                 NSAttributedString.attributedStringWithAttachment_(att))
-            s.appendAttributedString_(_seg_font(" " + _title_value(rec), color, font))
+            if not glyph_only:
+                s.appendAttributedString_(
+                    _seg_font(" " + _title_value(rec), color, font))
         else:
-            s.appendAttributedString_(_seg_font(fallback + _title_value(rec), color, font))
+            # Text fallback (no glyph asset): the provider prefix stays even
+            # in glyph-only mode, otherwise the segment would be invisible.
+            text = fallback if glyph_only else fallback + _title_value(rec)
+            s.appendAttributedString_(_seg_font(text, color, font))
     return s
 
 
@@ -703,6 +818,331 @@ class _MenuDelegate(NSObject):
             AppHelper.callAfter(_APP.refresh, None)
 
 
+# ------------------------------------------------------------ settings window
+_SETTINGS_W, _SETTINGS_H = 430, 520
+_SETTINGS_LABEL_W = 92          # BARS-section label column, keeps controls aligned
+# Fallback system colors per color key, for wells with no custom value.
+_HEALTH_SYSTEM_FALLBACK = {
+    HEALTH_GREEN_KEY: NSColor.systemGreenColor,
+    HEALTH_ORANGE_KEY: NSColor.systemOrangeColor,
+    HEALTH_RED_KEY: NSColor.systemRedColor,
+}
+_WELL_KEY_BY_TAG = {0: HEALTH_GREEN_KEY, 1: HEALTH_ORANGE_KEY, 2: HEALTH_RED_KEY}
+
+
+def _mk_section_header(text):
+    lbl = NSTextField.labelWithString_(text.upper())
+    lbl.setFont_(NSFont.systemFontOfSize_weight_(11, W_SEMI))
+    lbl.setTextColor_(NSColor.secondaryLabelColor())
+    return lbl
+
+
+def _mk_label(text, width=None):
+    lbl = NSTextField.labelWithString_(text)
+    lbl.setFont_(NSFont.systemFontOfSize_(13))
+    if width is not None:
+        lbl.widthAnchor().constraintEqualToConstant_(width).setActive_(True)
+    return lbl
+
+
+def _mk_row(views, spacing=8):
+    row = NSStackView.alloc().init()
+    row.setOrientation_(0)   # horizontal
+    # NSLayoutAttributeCenterY = 10 (9 is CenterX — invalid for a horizontal
+    # stack and silently degrades the row into a vertical-ish pile).
+    row.setAlignment_(10)
+    row.setSpacing_(spacing)
+    for v in views:
+        row.addArrangedSubview_(v)
+    return row
+
+
+def _template_glyph(path):
+    """Small template NSImage for settings rows — unlike the menu-bar title
+    path (NSTextAttachment, which ignores template tinting), NSImageView
+    honors templates, so these auto-tint with the window's light/dark
+    appearance for free."""
+    img = NSImage.alloc().initWithContentsOfFile_(path)
+    if img is not None:
+        img.setSize_(NSMakeSize(16, 16))
+        img.setTemplate_(True)
+    return img
+
+
+class _SettingsController(NSObject):
+    """Builds and drives the native Settings window (spec §5c).
+
+    Retained on the app instance. Every control writes NSUserDefaults in its
+    action and then triggers a full refresh, so the title, dropdown bars, and
+    menu checkmarks all pick the change up immediately; the reverse direction
+    (menu quick-toggles) syncs back through _apply → refreshStates whenever
+    the window is visible. No timers anywhere.
+    """
+
+    def init(self):
+        self = objc.super(_SettingsController, self).init()
+        if self is None:
+            return None
+        self.window = None
+        self._provider_checks = {}   # provider key -> NSButton (checkbox)
+        self._provider_rows = {}     # provider key -> row stack (for dimming)
+        self._gemini_popup = None
+        self._radio_full = None
+        self._radio_glyph = None
+        self._wells = {}             # defaults key -> NSColorWell
+        self._warn_popup = None
+        self._crit_popup = None
+        self._heal_check = None
+        return self
+
+    # ------------------------------------------------------------- build
+    def buildWindow(self):
+        win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, _SETTINGS_W, _SETTINGS_H),
+            1 | 2,   # titled + closable; NOT miniaturizable, NOT resizable
+            2, False)
+        win.setTitle_("Claude Usage Settings")
+        win.setReleasedWhenClosed_(False)
+        win.setDelegate_(self)
+        content = NSView.alloc().initWithFrame_(
+            NSMakeRect(0, 0, _SETTINGS_W, _SETTINGS_H))
+        win.setContentView_(content)
+
+        stack = NSStackView.alloc().init()
+        stack.setTranslatesAutoresizingMaskIntoConstraints_(False)
+        stack.setOrientation_(1)   # vertical
+        stack.setAlignment_(5)     # leading
+        stack.setSpacing_(8)
+        content.addSubview_(stack)
+        NSLayoutConstraint.activateConstraints_([
+            stack.topAnchor().constraintEqualToAnchor_constant_(
+                content.topAnchor(), 20),
+            stack.leadingAnchor().constraintEqualToAnchor_constant_(
+                content.leadingAnchor(), 20),
+            stack.trailingAnchor().constraintLessThanOrEqualToAnchor_constant_(
+                content.trailingAnchor(), -20),
+        ])
+
+        def section(title, first=False):
+            hdr = _mk_section_header(title)
+            stack.addArrangedSubview_(hdr)
+            if not first:
+                # breathing room above each section header after the first
+                prev = stack.arrangedSubviews()[-2]
+                stack.setCustomSpacing_afterView_(18, prev)
+            return hdr
+
+        # -- PROVIDERS ------------------------------------------------
+        section("Providers", first=True)
+        for i, (key, skey, glyph_path, _f2, _fb, _lbls, _det) in enumerate(PROVIDERS):
+            views = []
+            img = _template_glyph(glyph_path)
+            if img is not None:
+                iv = NSImageView.imageViewWithImage_(img)
+                iv.widthAnchor().constraintEqualToConstant_(18).setActive_(True)
+                views.append(iv)
+            check = NSButton.checkboxWithTitle_target_action_(
+                key.title(), self, "toggleProvider:")
+            check.setTag_(i)
+            views.append(check)
+            if key == "gemini":
+                popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                    NSMakeRect(0, 0, 170, 25), False)
+                popup.addItemsWithTitles_([label for label, _c in GEMINI_PLANS])
+                popup.setTarget_(self)
+                popup.setAction_("pickGeminiPlan:")
+                self._gemini_popup = popup
+                views.append(popup)
+            row = _mk_row(views)
+            stack.addArrangedSubview_(row)
+            self._provider_checks[key] = check
+            self._provider_rows[key] = row
+
+        # -- MENU BAR ---------------------------------------------------
+        section("Menu Bar")
+        self._radio_full = NSButton.radioButtonWithTitle_target_action_(
+            "Glyph + percent", self, "pickMode:")
+        self._radio_full.setTag_(0)
+        self._radio_glyph = NSButton.radioButtonWithTitle_target_action_(
+            "Glyph only", self, "pickMode:")
+        self._radio_glyph.setTag_(1)
+        # both radios share one superview + action → AppKit groups them
+        stack.addArrangedSubview_(
+            _mk_row([self._radio_full, self._radio_glyph], spacing=16))
+
+        # -- BARS -------------------------------------------------------
+        section("Bars")
+        for tag, (title, key) in enumerate(
+                (("Healthy", HEALTH_GREEN_KEY),
+                 ("Warning", HEALTH_ORANGE_KEY),
+                 ("Critical", HEALTH_RED_KEY))):
+            well = NSColorWell.alloc().initWithFrame_(NSMakeRect(0, 0, 44, 24))
+            well.setTag_(tag)
+            well.setTarget_(self)
+            well.setAction_("wellChanged:")
+            well.widthAnchor().constraintEqualToConstant_(44).setActive_(True)
+            well.heightAnchor().constraintEqualToConstant_(24).setActive_(True)
+            self._wells[key] = well
+            stack.addArrangedSubview_(
+                _mk_row([_mk_label(title, _SETTINGS_LABEL_W), well]))
+
+        self._warn_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(0, 0, 100, 25), False)
+        self._warn_popup.addItemsWithTitles_(
+            [f"{round(v * 100)}%" for v in WARN_CHOICES])
+        self._warn_popup.setTarget_(self)
+        self._warn_popup.setAction_("pickWarn:")
+        stack.addArrangedSubview_(_mk_row(
+            [_mk_label("Warning at", _SETTINGS_LABEL_W), self._warn_popup]))
+
+        self._crit_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(0, 0, 100, 25), False)
+        self._crit_popup.addItemsWithTitles_(
+            [f"{round(v * 100)}%" for v in CRIT_CHOICES])
+        self._crit_popup.setTarget_(self)
+        self._crit_popup.setAction_("pickCrit:")
+        stack.addArrangedSubview_(_mk_row(
+            [_mk_label("Critical at", _SETTINGS_LABEL_W), self._crit_popup]))
+
+        reset = NSButton.buttonWithTitle_target_action_(
+            "Reset to Defaults", self, "resetBars:")
+        stack.addArrangedSubview_(reset)
+
+        # -- ADVANCED ---------------------------------------------------
+        section("Advanced")
+        self._heal_check = NSButton.checkboxWithTitle_target_action_(
+            "Auto-restore icon after wake", self, "toggleHeal:")
+        stack.addArrangedSubview_(self._heal_check)
+
+        # Size the window to the assembled content (~430x520 nominal; the
+        # actual height tracks the stack's fitting size so nothing clips).
+        fit = stack.fittingSize()
+        win.setContentSize_(NSMakeSize(
+            _SETTINGS_W, max(_SETTINGS_H, fit.height + 40)))
+
+        self.window = win
+        self.refreshStates()
+        return win
+
+    # ------------------------------------------------------------- sync
+    def refreshStates(self):
+        """Re-read every default into the controls (window → defaults sync
+        happens in the actions; this is the defaults → window direction)."""
+        for i, (key, skey, *_rest) in enumerate(PROVIDERS):
+            check = self._provider_checks.get(key)
+            if check is not None:
+                check.setState_(1 if provider_enabled(skey) else 0)
+        if self._gemini_popup is not None:
+            cap = gemini_cap()
+            idx = next((i for i, (_l, c) in enumerate(GEMINI_PLANS) if c == cap), 0)
+            self._gemini_popup.selectItemAtIndex_(idx)
+        mode = display_mode()
+        if self._radio_full is not None:
+            self._radio_full.setState_(1 if mode == "full" else 0)
+            self._radio_glyph.setState_(1 if mode == "glyph" else 0)
+        for key, well in self._wells.items():
+            well.setColor_(health_custom_color(key)
+                           or _HEALTH_SYSTEM_FALLBACK[key]())
+        if self._warn_popup is not None:
+            warn, crit = _thresholds()
+            self._warn_popup.selectItemAtIndex_(min(
+                range(len(WARN_CHOICES)),
+                key=lambda i: abs(WARN_CHOICES[i] - warn)))
+            self._crit_popup.selectItemAtIndex_(min(
+                range(len(CRIT_CHOICES)),
+                key=lambda i: abs(CRIT_CHOICES[i] - crit)))
+        if self._heal_check is not None:
+            self._heal_check.setState_(1 if self_heal_enabled() else 0)
+
+    def refreshDetection(self):
+        """Dim undetected providers + '(not detected)' suffix. Separate from
+        refreshStates because claude's detect() shells out to `security` —
+        run on window open, not on every _apply sync."""
+        for i, (key, _sk, _g, _f2, _fb, _lbls, detect) in enumerate(PROVIDERS):
+            try:
+                det = bool(detect())
+            except Exception:
+                det = False
+            row = self._provider_rows.get(key)
+            check = self._provider_checks.get(key)
+            if row is not None:
+                row.setAlphaValue_(1.0 if det else 0.45)
+            if check is not None:
+                check.setTitle_(key.title() if det
+                                else f"{key.title()} (not detected)")
+
+    # ------------------------------------------------------------ actions
+    def _refresh_app(self):
+        if _APP is not None:
+            _APP.refresh(None)
+
+    def toggleProvider_(self, sender):
+        key = PROVIDERS[sender.tag()][1]
+        set_provider_enabled(key, sender.state() == 1)
+        self._refresh_app()
+
+    def pickGeminiPlan_(self, sender):
+        idx = sender.indexOfSelectedItem()
+        if 0 <= idx < len(GEMINI_PLANS):
+            set_gemini_cap(GEMINI_PLANS[idx][1])
+        self._refresh_app()
+
+    def pickMode_(self, sender):
+        set_display_mode("glyph" if sender.tag() == 1 else "full")
+        self._refresh_app()
+
+    def wellChanged_(self, sender):
+        key = _WELL_KEY_BY_TAG.get(sender.tag())
+        if key:
+            set_health_color(key, sender.color())
+        # Dragging in the color panel fires this continuously; refresh()'s
+        # in-flight guard + queued-follow-up coalesce the burst to at most
+        # one probe mid-drag and one at the end.
+        self._refresh_app()
+
+    def pickWarn_(self, sender):
+        idx = sender.indexOfSelectedItem()
+        if 0 <= idx < len(WARN_CHOICES):
+            v = WARN_CHOICES[idx]
+            set_warn_threshold(v)
+            if v >= crit_threshold():
+                # keep the pair valid (0.7 warn vs 0.7 crit) — bump crit up
+                set_crit_threshold(next((c for c in CRIT_CHOICES if c > v),
+                                        CRIT_CHOICES[-1]))
+        self.refreshStates()
+        self._refresh_app()
+
+    def pickCrit_(self, sender):
+        idx = sender.indexOfSelectedItem()
+        if 0 <= idx < len(CRIT_CHOICES):
+            v = CRIT_CHOICES[idx]
+            set_crit_threshold(v)
+            if v <= warn_threshold():
+                # mirror guard: drop warn below the new crit
+                set_warn_threshold(next(
+                    (w for w in reversed(WARN_CHOICES) if w < v),
+                    WARN_CHOICES[0]))
+        self.refreshStates()
+        self._refresh_app()
+
+    def resetBars_(self, sender):
+        reset_bar_defaults()
+        self.refreshStates()
+        self._refresh_app()
+
+    def toggleHeal_(self, sender):
+        set_self_heal(sender.state() == 1)
+        self._refresh_app()
+
+    # ------------------------------------------------------- window delegate
+    def windowWillClose_(self, note):
+        # The shared color panel outlives the settings window otherwise.
+        try:
+            NSColorPanel.sharedColorPanel().orderOut_(None)
+        except Exception:
+            pass
+
+
 class CCCBar(rumps.App):
     def __init__(self):
         global _APP
@@ -721,6 +1161,7 @@ class CCCBar(rumps.App):
         self._menu_delegate = _MenuDelegate.alloc().init()
         self._delegate_attached = False
         self._autosave_applied = False
+        self._settings_ctl = None  # lazily built on first Settings… open
         NSDistributedNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self._menu_delegate, "themeChanged:",
             "AppleInterfaceThemeChangedNotification", None)
@@ -781,7 +1222,9 @@ class CCCBar(rumps.App):
                             for label, cap in GEMINI_PLANS])
         heal = rumps.MenuItem("Auto-restore icon", callback=self.toggle_self_heal)
         heal.state = 1 if self_heal_enabled() else 0
-        settings.update([show_c, show_x, show_r, show_g, gemini_plan, heal])
+        settings.update([show_c, show_x, show_r, show_g, gemini_plan, heal,
+                         None,  # separator above the full window entry
+                         rumps.MenuItem("Settings…", callback=self.open_settings)])
         return [
             None,
             rumps.MenuItem("Refresh now", callback=self.refresh),
@@ -892,6 +1335,15 @@ class CCCBar(rumps.App):
         if rebuild:
             self._show(data)
 
+        # Keep an open settings window's controls in sync with changes made
+        # from the menu quick-toggles (defaults → window direction).
+        ctl = getattr(self, "_settings_ctl", None)
+        if ctl is not None and ctl.window is not None and ctl.window.isVisible():
+            try:
+                ctl.refreshStates()
+            except Exception:
+                pass
+
         if self._refresh_again:
             # A refresh landed while this one was in flight (see refresh()) —
             # run it now that painting is done, rather than dropping it.
@@ -973,6 +1425,18 @@ class CCCBar(rumps.App):
         # Rebuild the dropdown so the picked item's checkmark (and every
         # other plan item's) reflects the new selection immediately.
         self.refresh(None)
+
+    def open_settings(self, _):
+        # Single lazily-created window; reopening just brings it forward
+        # with freshly synced control states + detection dimming.
+        if self._settings_ctl is None:
+            self._settings_ctl = _SettingsController.alloc().init()
+            self._settings_ctl.buildWindow().center()
+        else:
+            self._settings_ctl.refreshStates()
+        self._settings_ctl.refreshDetection()
+        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        self._settings_ctl.window.makeKeyAndOrderFront_(None)
 
     def open_terminal(self, _):
         subprocess.Popen(
