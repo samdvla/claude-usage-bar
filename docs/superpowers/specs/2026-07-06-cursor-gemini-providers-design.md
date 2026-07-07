@@ -44,6 +44,14 @@ None; the UI renders only the windows named in the labels.
 
 - Display rule: item shown iff `detect()` AND `provider_enabled(key)`.
   Undetected → no item, no fetch, no probe, no dropdown section.
+- **Activity window (added 2026-07-06, user feedback):** `detect()` means
+  *recently active*, not merely installed — the provider's data source must
+  show activity within `ACTIVE_DAYS = 14`: Codex/Gemini = newest session
+  file mtime; Cursor = state.vscdb mtime (plus token present). Claude stays
+  presence-based (Claude Code refreshes its keychain entry continuously and
+  is the app's core provider). An installed-but-idle tool disappears from
+  the bar; the Settings toggle remains a manual override for *hiding* only
+  (it cannot force-show an undetected provider).
 - `detect()` runs at launch and on every refresh tick (all checks are a
   stat/keychain call; cache within a tick). A tool installed mid-session
   appears within one tick.
