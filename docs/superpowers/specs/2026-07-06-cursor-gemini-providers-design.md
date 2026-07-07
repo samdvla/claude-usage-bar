@@ -96,20 +96,31 @@ None; the UI renders only the windows named in the labels.
   "estimated from local session logs". README documents the limits (single
   machine, tier not auto-detected, retries counted).
 
-## 5. macOS UI generalization (bin/ccc-bar)
+## 5. macOS UI: back to ONE status item (user decision 2026-07-06)
 
-- Status items: provider→item map replaces the hardcoded pair. Claude stays
-  the rumps item; codex/cursor/gemini are managed NSStatusItems using the
-  existing autosave/seed/stash machinery, band 600/599/598/597 (order:
-  claude, codex, cursor, gemini left→right), names `ccc-<provider>-item`.
-- Dropdown: sections iterate detected+enabled providers; `bar_row` gains
-  nothing — window labels come from the PROVIDERS table; single-window
-  providers render one bar. Estimated providers show `est.` in the value
-  and the footnote line.
+Reverses the v1 separate-items experiment (548c5e9/87e70e9): all providers
+render in a SINGLE status item (the rumps item), as `[glyph] NN%` segments
+separated by a uniform fixed separator (`SEGMENT_GAP = "   "`, three
+spaces in the title font — identical between every pair, tunable in one
+place). Order: claude, codex, cursor, gemini.
+
+- Toggling/detection removes a segment (and its dropdown section); the gap
+  count adjusts automatically. All providers hidden/undetected → terminal
+  icon only (existing anchor behavior).
+- **Removal:** the multi-item machinery is deleted — `_codex_item`
+  management, position seeding, `_stash_position`/`_unstash_position`,
+  `_recreate_claude_item`, the 600/599 band constants. The single rumps
+  item keeps its `autosaveName` (position persistence is still useful) and
+  the existing wake-restore recreate. Net code reduction.
+- Dropdown: sections iterate detected+enabled providers; window labels
+  come from the PROVIDERS table; single-window providers render one bar.
+  Estimated providers show `est.` in the value and the footnote line.
 - Settings: Show <Provider> toggle per provider (existing two + two new
   keys `showCursor`/`showGemini`, default ON) + "Gemini plan ▸" submenu
   (radio-style checkmarks).
-- Wake-restore recreates every existing managed item (loop, not pair).
+- The first implementation task is this single-item revert (Claude+Codex
+  only), deployed immediately so Sam validates the look before the new
+  providers land on top of it.
 
 ## 6. Windows UI generalization
 
