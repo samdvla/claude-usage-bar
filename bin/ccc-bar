@@ -79,7 +79,9 @@ MIN_INFILL_FRACTION = 0.5
 # glyph boundaries.
 BAR_DOT_D = 1.5           # dot diameter (~the old ░ speckle size)
 BAR_DOT_PITCH = 4.5       # dot grid pitch, both axes
-BAR_DOT_ALPHA = 0.5       # dots dimmed (Sam 2026-07-06: "less visible")
+# Dot color: quaternaryLabelColor — the system's dimmest label tier (~0.10
+# alpha both appearances). NOTE: colorWithAlphaComponent_ REPLACES alpha
+# (it does not compose), which made an earlier "dimming" attempt brighter.
 # Track background: near-black over the dark menu material (Sam's original
 # track read ~#2b2b2d there); over a light menu it degrades to a medium gray.
 BAR_TRACK_ALPHA = 0.25
@@ -450,7 +452,7 @@ class BarRowView(NSView):
         #    clipped to the track's rounded path ---------------------------
         ctx.saveGraphicsState()
         track_path.addClip()
-        NSColor.tertiaryLabelColor().colorWithAlphaComponent_(BAR_DOT_ALPHA).set()
+        NSColor.quaternaryLabelColor().set()
         n_rows = int((BAR_TRACK_H - BAR_DOT_D) // BAR_DOT_PITCH) + 1
         grid_h = (n_rows - 1) * BAR_DOT_PITCH + BAR_DOT_D
         dot_y0 = track_y + (BAR_TRACK_H - grid_h) / 2.0
