@@ -267,7 +267,7 @@ PROVIDERS = (
     ("claude", SHOW_CLAUDE_KEY, GLYPH_CLAUDE, claude_usage, "C:",
      ("5h", "7d"), lambda: claude_code_creds() is not None),
     ("codex", SHOW_CODEX_KEY, GLYPH_CODEX, codex_usage, "X:",
-     ("5h", "7d"), lambda: os.path.isdir(os.path.expanduser("~/.codex/sessions"))),
+     ("5h", "7d"), lambda: _CODEX is not None and _CODEX.codex_detected()),
     ("cursor", SHOW_CURSOR_KEY, GLYPH_CURSOR, cursor_usage, "R:",
      ("month", None), lambda: _CURSOR is not None and _CURSOR.cursor_detected()),
     ("gemini", SHOW_GEMINI_KEY, GLYPH_GEMINI, gemini_usage, "G:",

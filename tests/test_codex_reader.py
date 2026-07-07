@@ -86,6 +86,26 @@ def test_no_data_when_missing(tmp_path):
     root = _mkroot(tmp_path, [("2026/07/06/rollout-a.jsonl", ["{}"])])
     assert m.codex_usage(root=root, now=NOW)["state"] == "no_data"
 
+def test_detected_fresh_activity(tmp_path):
+    import os
+    m = _load()
+    root = _mkroot(tmp_path, [("2026/07/06/rollout-a.jsonl", [_event()])])
+    now = time.time()
+    os.utime(f"{root}/2026/07/06/rollout-a.jsonl", (now - 3600, now - 3600))
+    assert m.codex_detected(root=root) is True
+
+def test_detected_stale_activity(tmp_path):
+    import os
+    m = _load()
+    root = _mkroot(tmp_path, [("2026/07/06/rollout-a.jsonl", [_event()])])
+    stale = time.time() - 20 * 86400  # outside the 14-day activity window
+    os.utime(f"{root}/2026/07/06/rollout-a.jsonl", (stale, stale))
+    assert m.codex_detected(root=root) is False
+
+def test_detected_missing_root(tmp_path):
+    m = _load()
+    assert m.codex_detected(root=str(tmp_path / "nope")) is False
+
 def test_unreadable_dir_degrades_gracefully(tmp_path):
     import os
     m = _load()

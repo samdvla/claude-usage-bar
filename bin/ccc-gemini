@@ -36,6 +36,10 @@ GEMINI_ROOT = os.path.expanduser("~/.gemini")
 PT = ZoneInfo("America/Los_Angeles")
 STALE_SECONDS = 48 * 3600
 DEFAULT_CAP = 1000
+# Auto-detection means "recently ACTIVE", not merely "installed": an old
+# ~/.gemini tree from a long-abandoned trial shouldn't surface a menu-bar
+# segment forever. The newest chat log's mtime is the recency signal.
+ACTIVE_DAYS = 14
 
 
 def _midnight_pt(now):
@@ -103,17 +107,35 @@ def _count_file(path, midnight_epoch):
     return count
 
 
-def gemini_detected(root=None):
+def gemini_detected(root=None, active_days=ACTIVE_DAYS):
+    """True when Gemini CLI is actively used here: at least one chat log
+    (either glob level) was written within `active_days` days."""
     root = GEMINI_ROOT if root is None else root
-    return os.path.isdir(os.path.join(root, "tmp"))
+    newest = None
+    for path in _session_files(root):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if newest is None or mtime > newest:
+            newest = mtime
+    if newest is None:
+        return False
+    return (time.time() - newest) <= active_days * 86400
 
 
 def gemini_usage(root=None, cap=1000, now=None):
-    """Normalized, estimated Gemini daily-usage record; see module docstring."""
+    """Normalized, estimated Gemini daily-usage record; see module docstring.
+
+    Deliberately gated on the tmp dir existing, NOT on gemini_detected()'s
+    activity window — usage semantics ("count today's records, zero is a
+    valid answer") don't change just because the last session was weeks ago;
+    recency gating is the UI's display concern, applied via gemini_detected().
+    """
     root = GEMINI_ROOT if root is None else root
     now = int(time.time()) if now is None else now
 
-    if not gemini_detected(root):
+    if not os.path.isdir(os.path.join(root, "tmp")):
         return {"state": "no_data"}
 
     if not isinstance(cap, (int, float)) or isinstance(cap, bool) or cap < 1:

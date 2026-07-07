@@ -218,8 +218,27 @@ def test_missing_tmp_dir_no_data(tmp_path):
     assert m.gemini_detected(root=str(root)) is False
 
 
-def test_detected_true_when_tmp_present(tmp_path):
+def test_detected_recent_chat_activity(tmp_path):
     m = _load()
-    root = tmp_path / "gemini_root"
-    (root / "tmp").mkdir(parents=True)
-    assert m.gemini_detected(root=str(root)) is True
+    # newest activity lives in a SUBAGENT file (second glob level) — both
+    # levels must feed detection.
+    root = _mkroot(tmp_path, [
+        ("tmp/hash1/chats/parent123/sub456.jsonl", [_gemini_rec(NOW - 3600)]),
+    ], mtime=time.time() - 3600)
+    assert m.gemini_detected(root=root) is True
+
+
+def test_detected_false_when_stale_or_empty(tmp_path):
+    m = _load()
+    stale = time.time() - 20 * 86400  # outside the 14-day activity window
+    root = _mkroot(tmp_path, [
+        ("tmp/hash1/chats/session.jsonl", [_gemini_rec(NOW - 3600)]),
+    ], mtime=stale)
+    assert m.gemini_detected(root=root) is False
+    # bare tmp dir, no chat files at all → merely installed, not active
+    root2 = tmp_path / "gemini_root2"
+    (root2 / "tmp").mkdir(parents=True)
+    assert m.gemini_detected(root=str(root2)) is False
+    # ...but gemini_usage still treats an existing tmp dir as a live source
+    # (zero is a valid count) — recency gating is only the display rule.
+    assert m.gemini_usage(root=str(root2), now=NOW)["state"] == "ok"

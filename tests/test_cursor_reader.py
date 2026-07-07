@@ -1,4 +1,4 @@
-import importlib.machinery, importlib.util, json, os, pathlib, sqlite3, stat
+import importlib.machinery, importlib.util, json, os, pathlib, sqlite3, stat, time
 import urllib.error
 import pytest
 
@@ -228,7 +228,23 @@ def test_no_token(tmp_path):
     assert m.cursor_detected(state_db=db) is False
 
     db2 = _mkdb(tmp_path, token="x.y.z", name="state2.vscdb")
-    assert m.cursor_detected(state_db=db2) is True
+    assert m.cursor_detected(state_db=db2) is True  # fresh mtime + token
+
+
+def test_detected_stale_state_db(tmp_path):
+    m = _load()
+    db = _mkdb(tmp_path)
+    assert m.cursor_detected(state_db=db) is True  # freshly written → active
+    stale = time.time() - 20 * 86400  # outside the 14-day activity window
+    os.utime(db, (stale, stale))
+    assert m.cursor_detected(state_db=db) is False  # token present but inactive
+
+
+def test_detected_fresh_mtime_without_token(tmp_path):
+    m = _load()
+    db = _mkdb(tmp_path, token=None)  # fresh mtime, no login token
+    assert m.cursor_detected(state_db=db) is False
+    assert m.cursor_detected(state_db=str(tmp_path / "missing.vscdb")) is False
 
 
 def test_network_error_keeps_cache(tmp_path):

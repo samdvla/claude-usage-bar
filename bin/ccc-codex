@@ -20,6 +20,10 @@ from datetime import datetime
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
 TAIL_BYTES = 64 * 1024
 MAX_FILES = 3
+# Auto-detection means "recently ACTIVE", not merely "installed": an old
+# sessions tree from a long-abandoned trial shouldn't surface a menu-bar
+# segment forever. The newest session log's mtime is the recency signal.
+ACTIVE_DAYS = 14
 
 
 def _mtime(p):
@@ -97,6 +101,17 @@ def _parse_iso(ts):
         return None
 
 
+def codex_detected(root=None, active_days=ACTIVE_DAYS):
+    """True when Codex is actively used here: the newest session log was
+    written within `active_days` days. No session files at all → False."""
+    root = CODEX_SESSIONS if root is None else root
+    files = _session_files(root, limit=1)
+    if not files:
+        return False
+    mtime = _mtime(files[0])
+    return mtime > 0 and (time.time() - mtime) <= active_days * 86400
+
+
 def codex_usage(root=None, now=None):
     """Normalized Codex usage record; see module docstring for semantics."""
     root = CODEX_SESSIONS if root is None else root
@@ -121,4 +136,13 @@ def codex_usage(root=None, now=None):
 
 
 if __name__ == "__main__":
+    import argparse
+    import sys
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--detect", action="store_true")
+    args = parser.parse_args()
+
+    if args.detect:
+        sys.exit(0 if codex_detected() else 1)
+
     print(json.dumps(codex_usage()))

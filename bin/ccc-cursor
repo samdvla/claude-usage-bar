@@ -45,6 +45,11 @@ CACHE = os.path.expanduser("~/.config/ccc/cursor-cache.json")
 API = "https://api2.cursor.sh/aiserver.v1.DashboardService/"
 TIMEOUT = 20
 MIN_INTERVAL = 300
+# Auto-detection means "recently ACTIVE", not merely "installed": a machine
+# with an abandoned Cursor install keeps a stale login token around forever,
+# which shouldn't surface a menu-bar segment. The state DB's own mtime is the
+# cheap recency signal (Cursor rewrites it while in use).
+ACTIVE_DAYS = 14
 
 
 def _num(v):
@@ -138,9 +143,17 @@ def _clear_cache(cache_path):
         pass
 
 
-def cursor_detected(state_db=None):
+def cursor_detected(state_db=None, active_days=ACTIVE_DAYS):
+    """True when Cursor is actively used here: login token present AND the
+    settings store was modified within `active_days` days."""
     state_db = STATE_DB if state_db is None else state_db
-    return _token(state_db) is not None
+    if _token(state_db) is None:
+        return False
+    try:
+        mtime = os.path.getmtime(state_db)
+    except OSError:
+        return False
+    return (time.time() - mtime) <= active_days * 86400
 
 
 def cursor_usage(state_db=None, cache_path=None, now=None, urlopen=None, min_interval=MIN_INTERVAL):
