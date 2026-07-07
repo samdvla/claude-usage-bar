@@ -35,7 +35,8 @@ from AppKit import (NSApplication, NSBezierPath, NSButton, NSColor,
                     NSGraphicsContext, NSImage, NSImageView,
                     NSLayoutConstraint, NSPopUpButton, NSRectFill,
                     NSRectFillUsingOperation, NSStackView, NSStatusBar,
-                    NSTextAttachment, NSTextField, NSView, NSWindow)
+                    NSTextAttachment, NSTextField, NSTrackingArea, NSView,
+                    NSWindow)
 from Foundation import (NSDistributedNotificationCenter, NSMakePoint,
                         NSMakeRect, NSMakeSize, NSMutableAttributedString,
                         NSAttributedString, NSObject, NSUserDefaults)
@@ -684,6 +685,111 @@ class BarRowView(NSView):
             outside_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
 
 
+SETTINGS_ITEM_H = 22          # native menu item row height
+SETTINGS_ITEM_TEXT_X = 15     # native item text ≈21pt menu-absolute − ~6pt view origin
+
+
+class SettingsItemView(NSView):
+    """The dropdown's "Settings" row: CLICK opens the Settings window while
+    HOVER still opens the attached quick-toggles submenu.
+
+    Why a custom view: a stock NSMenuItem that owns a submenu never sends
+    its action on click — AppKit reserves clicks on submenu parents for
+    submenu tracking (Apple, "How Menus Work", Application Menu and Pop-up
+    List Programming Topics, developer.apple.com/library/archive/
+    documentation/Cocoa/Conceptual/MenuList/Articles/HowMenusWork.html), and
+    no modern AppKit API adds click-through submenu parents. The supported
+    escape hatch is a view-backed item: "A menu item with a view does not
+    draw its title, state, font, or other standard drawing attributes, and
+    assigns drawing responsibility entirely to the view. A view in a menu
+    item can receive all mouse events as normal" (same guide, "Views in Menu
+    Items"; the mouseUp → enclosingMenuItem → menu.cancelTracking() pattern
+    is Apple's own, echoed in dev-forums thread 99758). Submenu display
+    stays owned by NSMenu's tracking (keyed to the item, not its view), so
+    hovering the row should still pop the submenu — that half is empirically
+    confirmed on a live deploy, per the §5c refinement round.
+
+    The view draws native-looking text + submenu chevron + the modern
+    rounded hover highlight (selectedContentBackgroundColor pill, white text
+    while highlighted), since view-backed items get none of that for free.
+    Keyboard navigation cannot highlight a view-backed item (keyboard events
+    are unsupported for menu item views, ibid.) — accepted for this row.
+    """
+
+    def initWithWidth_(self, width):
+        self = objc.super(SettingsItemView, self).initWithFrame_(
+            NSMakeRect(0, 0, width, SETTINGS_ITEM_H))
+        if self is None:
+            return None
+        self._hover = False
+        self.setAutoresizingMask_(2)  # NSViewWidthSizable — track menu width
+        return self
+
+    def isFlipped(self):
+        return True
+
+    def updateTrackingAreas(self):
+        objc.super(SettingsItemView, self).updateTrackingAreas()
+        for ta in list(self.trackingAreas() or []):
+            self.removeTrackingArea_(ta)
+        # MouseEnteredAndExited(0x01) | ActiveAlways(0x80) | InVisibleRect(0x200)
+        self.addTrackingArea_(
+            NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+                self.bounds(), 0x281, self, None))
+
+    def mouseEntered_(self, event):
+        self._hover = True
+        self.setNeedsDisplay_(True)
+
+    def mouseExited_(self, event):
+        self._hover = False
+        self.setNeedsDisplay_(True)
+
+    def mouseUp_(self, event):
+        # Apple's documented pattern for actions from view-backed items:
+        # stop menu tracking, then act. The window open rides callAfter so
+        # the menu finishes tearing down first.
+        item = self.enclosingMenuItem()
+        menu = item.menu() if item is not None else None
+        if menu is not None:
+            menu.cancelTracking()
+        if _APP is not None:
+            AppHelper.callAfter(_APP.open_settings, None)
+
+    def _is_highlighted(self):
+        if self._hover:
+            return True
+        try:
+            item = self.enclosingMenuItem()
+            return bool(item is not None and item.isHighlighted())
+        except Exception:
+            return False
+
+    def drawRect_(self, rect):
+        bounds = self.bounds()
+        w, h = bounds.size.width, bounds.size.height
+        lit = self._is_highlighted()
+        if lit:
+            pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(0, 1, w, h - 2), 4.0, 4.0)
+            NSColor.selectedContentBackgroundColor().set()
+            pill.fill()
+        color = (NSColor.selectedMenuItemTextColor() if lit
+                 else NSColor.labelColor())
+        text = _seg_font("Settings", color, NSFont.menuFontOfSize_(0))
+        ts = text.size()
+        text.drawAtPoint_(NSMakePoint(SETTINGS_ITEM_TEXT_X, (h - ts.height) / 2.0))
+        # submenu chevron (view-backed items don't get the native arrow)
+        tri = NSBezierPath.bezierPath()
+        tip_x, mid_y = w - 12, h / 2.0
+        tri.moveToPoint_(NSMakePoint(tip_x, mid_y))
+        tri.lineToPoint_(NSMakePoint(tip_x - 4.5, mid_y - 4.0))
+        tri.lineToPoint_(NSMakePoint(tip_x - 4.5, mid_y + 4.0))
+        tri.closePath()
+        color.set()
+        tri.fill()
+
+
 def info_row(text):
     return _seg(text, NSColor.secondaryLabelColor(), 11, W_REG)
 
@@ -1230,15 +1336,14 @@ class CCCBar(rumps.App):
         show_g = rumps.MenuItem("Show Gemini",
                                 callback=lambda s: self._toggle_provider(s, SHOW_GEMINI_KEY))
         show_g.state = 1 if provider_enabled(SHOW_GEMINI_KEY) else 0
-        gemini_plan = rumps.MenuItem("Gemini plan")
-        current_cap = gemini_cap()
-        gemini_plan.update([self._gemini_plan_item(label, cap, current_cap)
-                            for label, cap in GEMINI_PLANS])
         heal = rumps.MenuItem("Auto-restore icon", callback=self.toggle_self_heal)
         heal.state = 1 if self_heal_enabled() else 0
-        settings.update([show_c, show_x, show_r, show_g, gemini_plan, heal,
-                         None,  # separator above the full window entry
-                         rumps.MenuItem("Settings…", callback=self.open_settings)])
+        # Submenu = quick toggles only (Gemini plan picker lives in the
+        # Settings window). The parent row is view-backed: click opens the
+        # window, hover opens this submenu — see SettingsItemView.
+        settings.update([show_c, show_x, show_r, show_g, heal])
+        settings._menuitem.setView_(
+            SettingsItemView.alloc().initWithWidth_(BAR_ROW_W))
         return [
             None,
             rumps.MenuItem("Refresh now", callback=self.refresh),
@@ -1425,20 +1530,6 @@ class CCCBar(rumps.App):
         set_provider_enabled(key, new)
         sender.state = 1 if new else 0
         self.refresh(None)  # repaint title + dropdown immediately
-
-    def _gemini_plan_item(self, label, cap, current_cap):
-        item = rumps.MenuItem(label, callback=self._pick_gemini_cap)
-        item.state = 1 if cap == current_cap else 0
-        return item
-
-    def _pick_gemini_cap(self, sender):
-        for label, cap in GEMINI_PLANS:
-            if label == sender.title:
-                set_gemini_cap(cap)
-                break
-        # Rebuild the dropdown so the picked item's checkmark (and every
-        # other plan item's) reflects the new selection immediately.
-        self.refresh(None)
 
     def open_settings(self, _):
         # Single lazily-created window; reopening just brings it forward
