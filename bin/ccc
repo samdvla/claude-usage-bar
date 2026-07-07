@@ -79,9 +79,19 @@ render() {
   echo
 }
 
-codex_helper() {
-  if [ -x "$HOME/.local/bin/ccc-codex" ]; then echo "$HOME/.local/bin/ccc-codex"
-  else echo "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ccc-codex"; fi
+helper() { # $1 = helper name — installed copy wins, else sibling of this script
+  if [ -x "$HOME/.local/bin/$1" ]; then echo "$HOME/.local/bin/$1"
+  else echo "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$1"; fi
+}
+codex_helper()  { helper ccc-codex; }
+cursor_helper() { helper ccc-cursor; }
+gemini_helper() { helper ccc-gemini; }
+
+gemini_cap() { # daily request cap from the menu bar app's setting, else 1000
+  local cap
+  cap=$(defaults read com.claude-usage-bar geminiDailyCap 2>/dev/null) || cap=1000
+  [[ "$cap" =~ ^[0-9]+$ ]] || cap=1000
+  echo "$cap"
 }
 
 render_codex() {
@@ -101,7 +111,7 @@ render_codex() {
   [[ "$r5" =~ ^[0-9]+$ ]] || r5=""
   if [ -n "$asof" ]; then
     local age=$(( $(date +%s) - asof ))
-    [ "$age" -gt 120 ] && agestr=" · as of $((age/60))m ago"
+    [ "$age" -gt 120 ] && agestr=" · $((age/60))m ago"
   fi
   c5=$(color_for "$u5"); c7=$(color_for "$u7")
   p5=$(awk -v u="$u5" 'BEGIN{printf "%d",u*100+0.5}'); p7=$(awk -v u="$u7" 'BEGIN{printf "%d",u*100+0.5}')
@@ -114,14 +124,89 @@ render_codex() {
   return 0
 }
 
+render_cursor() {
+  local rec state u5 r5 asof plan stale c5 p5 head agestr=""
+  python3 "$(cursor_helper)" --detect >/dev/null 2>&1 || return 0
+  rec=$(python3 "$(cursor_helper)" 2>/dev/null) || return 0
+  state=$(echo "$rec" | jq -r '.state // empty' 2>/dev/null) || state=""
+  if [ "$state" != "ok" ]; then
+    if [ "$state" = "expired" ]; then
+      echo "  ${C_BOLD}${C_CYN}cursor usage${C_RST}  ${C_DIM}· login expired — open Cursor to refresh${C_RST}"
+    else
+      echo "  ${C_BOLD}${C_CYN}cursor usage${C_RST}  ${C_DIM}· no usage data available${C_RST}"
+    fi
+    echo
+    return 0
+  fi
+  u5=$(echo "$rec" | jq -r '.u5 // 0' 2>/dev/null) || u5=0
+  r5=$(echo "$rec" | jq -r '.r5 // empty' 2>/dev/null) || r5=""
+  asof=$(echo "$rec" | jq -r '.as_of // empty' 2>/dev/null) || asof=""
+  plan=$(echo "$rec" | jq -r '.plan // empty' 2>/dev/null) || plan=""
+  stale=$(echo "$rec" | jq -r '.stale // false' 2>/dev/null) || stale="false"
+  [[ "$asof" =~ ^[0-9]+$ ]] || asof=""
+  [[ "$r5" =~ ^[0-9]+$ ]] || r5=""
+  if [ -n "$asof" ]; then
+    local age=$(( $(date +%s) - asof ))
+    [ "$age" -gt 120 ] && agestr=" · $((age/60))m ago"
+  fi
+  head="· month"
+  [ -n "$plan" ] && head="· $plan · month"
+  [ "$stale" = "true" ] && head="$head · cached"
+  c5=$(color_for "$u5")
+  p5=$(awk -v u="$u5" 'BEGIN{printf "%d",u*100+0.5}')
+  echo "  ${C_BOLD}${C_CYN}cursor usage${C_RST}  ${C_DIM}${head}${agestr}${C_RST}"
+  echo
+  printf "  mo  %s %s%3d%%%s\n" "$(bar "$u5" "$c5")" "$(colcode "$c5")" "$p5" "$C_RST"
+  echo
+  [ -n "$r5" ] && printf "  ${C_DIM}month resets %s${C_RST}\n" "$(countdown "$r5")" && echo
+  return 0
+}
+
+render_gemini() {
+  local rec state u5 r5 pct c5 p5
+  python3 "$(gemini_helper)" --detect >/dev/null 2>&1 || return 0
+  rec=$(python3 "$(gemini_helper)" --cap "$(gemini_cap)" 2>/dev/null) || return 0
+  state=$(echo "$rec" | jq -r '.state // empty' 2>/dev/null) || state=""
+  if [ "$state" != "ok" ]; then
+    echo "  ${C_BOLD}${C_CYN}gemini usage${C_RST}  ${C_DIM}· no session data — run gemini once${C_RST}"
+    echo
+    return 0
+  fi
+  u5=$(echo "$rec" | jq -r '.u5 // 0' 2>/dev/null) || u5=0
+  r5=$(echo "$rec" | jq -r '.r5 // empty' 2>/dev/null) || r5=""
+  pct=$(echo "$rec" | jq -r '.pct // empty' 2>/dev/null) || pct=""
+  [[ "$r5" =~ ^[0-9]+$ ]] || r5=""
+  [[ "$pct" =~ ^[0-9]+(\.[0-9]+)?$ ]] || pct=""
+  c5=$(color_for "$u5")
+  # Displayed percentage is the UNCLAMPED estimate (.pct) when present —
+  # "est. 120%" over a bar capped at 100% — else the clamped u5.
+  if [ -n "$pct" ]; then p5=$(awk -v p="$pct" 'BEGIN{printf "%d",p*100+0.5}')
+  else p5=$(awk -v u="$u5" 'BEGIN{printf "%d",u*100+0.5}'); fi
+  echo "  ${C_BOLD}${C_CYN}gemini usage${C_RST}  ${C_DIM}· est. · day${C_RST}"
+  echo
+  printf "  day %s %sest. %d%%%s\n" "$(bar "$u5" "$c5")" "$(colcode "$c5")" "$p5" "$C_RST"
+  echo
+  [ -n "$r5" ] && printf "  ${C_DIM}day resets %s${C_RST}\n" "$(countdown "$r5")"
+  printf "  ${C_DIM}estimated from local session logs${C_RST}\n"
+  echo
+  return 0
+}
+
 if [ "$WATCH" = "1" ] && [ "$JSON" != "1" ]; then
   trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
   tput civis 2>/dev/null || true
-  while true; do clear; render || true; render_codex || true
+  while true; do clear; render || true; render_codex || true; render_cursor || true; render_gemini || true
     printf "  ${C_DIM}refreshing every %ss · ctrl-c to quit${C_RST}\n" "$INTERVAL"; sleep "$INTERVAL"; done
 else
   rc=0; render || rc=$?
-  if [ "$JSON" = "1" ]; then python3 "$(codex_helper)" 2>/dev/null || true
-  else render_codex; fi
+  if [ "$JSON" = "1" ]; then
+    python3 "$(codex_helper)" 2>/dev/null || true
+    if python3 "$(cursor_helper)" --detect >/dev/null 2>&1; then
+      python3 "$(cursor_helper)" 2>/dev/null || true
+    fi
+    if python3 "$(gemini_helper)" --detect >/dev/null 2>&1; then
+      python3 "$(gemini_helper)" --cap "$(gemini_cap)" 2>/dev/null || true
+    fi
+  else render_codex || true; render_cursor || true; render_gemini || true; fi
   exit "$rc"
 fi
