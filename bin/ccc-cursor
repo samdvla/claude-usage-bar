@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""ccc-cursor — probe Cursor's monthly usage quota via its unofficial dashboard API.
+
+Cursor (the AI code editor) has no documented API for a personal account to
+read its own usage; this mirrors the approach used by the actively-maintained
+OSS menu-bar app robinebers/openusage (see .superpowers/sdd/research-cursor.md
+for the full writeup): read the app's own OAuth access token out of its local
+SQLite settings store and call the same Connect-RPC endpoints the Cursor
+desktop app itself uses for its usage dashboard.
+
+Privacy / safety:
+  - The access token is read via a READ-ONLY, IMMUTABLE sqlite URI
+    (`mode=ro&immutable=1`) — this process never writes to Cursor's database.
+  - The token value is NEVER printed or logged, by this module or its CLI.
+  - No token-refresh call is ever made; an expired/rejected token (401/403)
+    is reported as state "expired" and the cache is cleared, nothing more.
+  - Because the usage endpoints are unofficial and undocumented, calls are
+    cached and rate-limited to once per `min_interval` seconds (default 300s
+    / 5 minutes, matching openusage's own default cadence) regardless of how
+    often `cursor_usage()` is invoked.
+
+Stdlib only — imported by ccc-bar and invoked as `python3 ccc-cursor` by the
+ccc CLI (prints the record as JSON).
+"""
+import json
+import os
+import stat
+import sys
+import time
+import sqlite3
+import urllib.error
+import urllib.request
+
+if sys.platform == "darwin":
+    STATE_DB = os.path.expanduser(
+        "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+elif sys.platform == "win32":
+    STATE_DB = os.path.join(
+        os.environ.get("APPDATA", ""), "Cursor", "User", "globalStorage", "state.vscdb")
+else:
+    STATE_DB = os.path.expanduser("~/.config/Cursor/User/globalStorage/state.vscdb")
+
+CACHE = os.path.expanduser("~/.config/ccc/cursor-cache.json")
+API = "https://api2.cursor.sh/aiserver.v1.DashboardService/"
+TIMEOUT = 20
+MIN_INTERVAL = 300
+
+
+def _token(state_db):
+    """Read-only, immutable read of the cursorAuth/accessToken value, or None."""
+    try:
+        con = sqlite3.connect(f"file:{state_db}?mode=ro&immutable=1", uri=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'"
+            ).fetchone()
+        finally:
+            con.close()
+        if not row or not row[0]:
+            return None
+        return row[0] if isinstance(row[0], str) else row[0].decode("utf-8", "replace")
+    except Exception:
+        return None
+
+
+def _post(name, token, urlopen):
+    """POST an empty-body Connect-RPC request to the named DashboardService method."""
+    req = urllib.request.Request(
+        API + name,
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1",
+        },
+        method="POST",
+    )
+    with urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read())
+
+
+def _read_cache(cache_path):
+    try:
+        with open(cache_path, "r") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict) and "record" in data and "fetched_at" in data:
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _write_cache(cache_path, now, record):
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w") as fh:
+            json.dump({"fetched_at": now, "record": record}, fh)
+        os.chmod(cache_path, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def _clear_cache(cache_path):
+    try:
+        os.remove(cache_path)
+    except OSError:
+        pass
+
+
+def cursor_detected(state_db=None):
+    state_db = STATE_DB if state_db is None else state_db
+    return _token(state_db) is not None
+
+
+def cursor_usage(state_db=None, cache_path=None, now=None, urlopen=None, min_interval=MIN_INTERVAL):
+    """Normalized Cursor monthly-usage record; see module docstring for semantics."""
+    state_db = STATE_DB if state_db is None else state_db
+    cache_path = CACHE if cache_path is None else cache_path
+    now = int(time.time()) if now is None else now
+    urlopen = urllib.request.urlopen if urlopen is None else urlopen
+
+    token = _token(state_db)
+    if token is None:
+        return {"state": "no_data"}
+
+    cached = _read_cache(cache_path)
+    if cached is not None and (now - cached["fetched_at"]) < min_interval:
+        return cached["record"]
+
+    try:
+        usage = _post("GetCurrentPeriodUsage", token, urlopen)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            _clear_cache(cache_path)
+            return {"state": "expired"}
+        if cached is not None:
+            rec = dict(cached["record"])
+            rec["stale"] = True
+            return rec
+        return {"state": "error"}
+    except Exception:
+        if cached is not None:
+            rec = dict(cached["record"])
+            rec["stale"] = True
+            return rec
+        return {"state": "error"}
+
+    if not usage.get("enabled", False):
+        return {"state": "no_data"}
+
+    plan_name = None
+    try:
+        plan_info = _post("GetPlanInfo", token, urlopen)
+        raw_plan = (plan_info or {}).get("planInfo", {}).get("planName")
+        if raw_plan:
+            plan_name = str(raw_plan).title()
+    except Exception:
+        plan_name = None
+
+    plan_usage = usage.get("planUsage") or {}
+    percent = plan_usage.get("totalPercentUsed")
+    if percent is None:
+        limit = plan_usage.get("limit")
+        spend = plan_usage.get("totalSpend")
+        if limit:
+            percent = (spend or 0) / limit * 100.0
+
+    u5 = None if percent is None else round(percent / 100.0, 4)
+    cycle_end = usage.get("billingCycleEnd")
+    r5 = None if cycle_end is None else int(cycle_end / 1000)
+
+    rec = {
+        "state": "ok",
+        "u5": u5,
+        "u7": None,
+        "r5": r5,
+        "r7": None,
+        "plan": plan_name,
+        "as_of": now,
+    }
+    _write_cache(cache_path, now, rec)
+    return rec
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--detect", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args()
+
+    if args.detect:
+        sys.exit(0 if cursor_detected() else 1)
+
+    min_interval = 0 if args.force else MIN_INTERVAL
+    print(json.dumps(cursor_usage(min_interval=min_interval)))
