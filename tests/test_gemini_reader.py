@@ -158,6 +158,23 @@ def test_cap_math_overflow_clamped(tmp_path):
     assert rec["cap"] == 10
 
 
+def test_pct_unclamped_over_cap(tmp_path):
+    # Spec §8: the bar (u5) caps at 100%, but "pct" carries the real,
+    # unclamped fraction so the UI can show e.g. "est. 120%".
+    m = _load()
+    today = NOW - 3600
+    files = [("tmp/hash1/chats/session.jsonl",
+              [_gemini_rec(today, f"g{i}") for i in range(1200)])]
+    root = _mkroot(tmp_path, files)
+    rec = m.gemini_usage(root=root, cap=1000, now=NOW)
+    assert rec["u5"] == 1.0
+    assert rec["pct"] == 1.2
+    # under-cap: pct matches u5
+    rec2 = m.gemini_usage(root=root, cap=4800, now=NOW)
+    assert rec2["u5"] == 0.25
+    assert rec2["pct"] == 0.25
+
+
 def test_cap_below_one_defaults_to_1000(tmp_path):
     m = _load()
     today = NOW - 3600

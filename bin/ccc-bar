@@ -57,13 +57,25 @@ BAR_ROW_H = 26
 # development, since a naive ~30pt guess clipped it into "montl". 2pt left
 # inset + ~37pt text + ~5pt breathing room before the track.
 BAR_TRACK_X = 44
-BAR_TRACK_RIGHT_MARGIN = 56  # track ends at (width - this); rest is the % column
+# % column: must fit the widest possible value, "est. 100%" (or "est. 120%"
+# for an over-cap Gemini estimate), ~56.6pt at 11pt monospacedDigit semibold —
+# 68 minus BAR_PCT_GAP and BAR_RIGHT_PAD leaves a 58pt text region.
+BAR_TRACK_RIGHT_MARGIN = 68  # track ends at (width - this); rest is the % column
 BAR_TRACK_H = 17
 BAR_TRACK_RADIUS = 5.0
 BAR_PCT_GAP = 4           # gap between track's right edge and the % text region
 BAR_RIGHT_PAD = 6         # inset from the view's right edge to the % text
 BAR_INFILL_INSET = 7      # inset from an edge (fill or track) for countdown text
 BAR_INFILL_PADDING = 14   # adaptive rule: fill must be >= text width + this
+# Adaptive rule, second gate: countdown only goes INSIDE the fill when
+# utilization is at least this fraction. Matches mockup C's picked look —
+# mid-range rows (32/33/42%) keep the countdown in the empty region; only
+# genuinely high fills (79%+) go battery-style, even though shorter countdown
+# strings would technically fit inside smaller fills.
+MIN_INFILL_FRACTION = 0.5
+# Fill darkening (mockup: color-mix(health 82%, black)): blend the health
+# color 18% toward black so the dark in-fill countdown text keeps contrast.
+BAR_FILL_DARKEN = 0.18
 # Dark, semibold countdown text drawn INSIDE a colored fill (battery-style).
 BAR_INFILL_TEXT_COLOR = NSColor.colorWithCalibratedRed_green_blue_alpha_(
     0x1A / 255.0, 0x1A / 255.0, 0x1E / 255.0, 0.72)
@@ -364,8 +376,9 @@ class BarRowView(NSView):
     every refresh, so drawRect_ only ever needs to render one static frame.
     """
 
-    def initWithLabel_util_resetEpoch_estimated_(self, label_text, util,
-                                                  reset_epoch, estimated):
+    def initWithLabel_util_resetEpoch_estimated_pct_(self, label_text, util,
+                                                      reset_epoch, estimated,
+                                                      real_pct):
         # objc.super (not plain super()) — a custom-named PyObjC initializer
         # calling an inherited selector other than its own name needs the
         # explicit ObjC super proxy, or the call raises AttributeError.
@@ -377,6 +390,10 @@ class BarRowView(NSView):
         self._util = util
         self._reset_epoch = reset_epoch
         self._estimated = estimated
+        # Unclamped real fraction (may exceed 1.0, e.g. Gemini over its daily
+        # cap): drives the displayed "est. NN%" text only — the fill always
+        # uses the clamped `util`. None → fall back to util for the text too.
+        self._real_pct = real_pct
         return self
 
     def isFlipped(self):
@@ -418,21 +435,32 @@ class BarRowView(NSView):
         track_path.fill()
 
         # -- health-color fill, clipped to the track's rounded shape so its
-        #    edges stay rounded (matches the mockup's overflow:hidden trick)
+        #    edges stay rounded (matches the mockup's overflow:hidden trick).
+        #    The fill is the health color darkened 18% toward black (mockup's
+        #    color-mix(health 82%, black)) for in-fill text contrast; the %
+        #    text outside keeps the plain health color, also per the mockup.
         fill_w = round(track_w * u)
         if fill_w > 0:
+            fill_color = hc.blendedColorWithFraction_ofColor_(
+                BAR_FILL_DARKEN, NSColor.blackColor()) or hc
             fill_rect = NSMakeRect(BAR_TRACK_X, track_rect.origin.y,
                                    fill_w, BAR_TRACK_H)
             ctx = NSGraphicsContext.currentContext()
             ctx.saveGraphicsState()
             track_path.addClip()
-            hc.set()
+            fill_color.set()
             NSRectFill(fill_rect)
             ctx.restoreGraphicsState()
 
         # -- percent, OUTSIDE the track, right-aligned, health color -------
-        pct_text = (f"est. {pct(self._util)}" if self._estimated
-                    else pct(self._util))
+        if self._estimated:
+            # Real (unclamped) estimate when available — an over-cap Gemini
+            # day reads "est. 120%" while the fill itself stays capped.
+            rp = f(self._real_pct)
+            pct_text = (f"est. {round(rp * 100)}%" if rp is not None
+                        else f"est. {pct(self._util)}")
+        else:
+            pct_text = pct(self._util)
         pct_region_right = w - BAR_RIGHT_PAD
         pct_region_left = w - BAR_TRACK_RIGHT_MARGIN + BAR_PCT_GAP
         pct_avail = max(0.0, pct_region_right - pct_region_left)
@@ -456,7 +484,8 @@ class BarRowView(NSView):
         infill_font = NSFont.systemFontOfSize_weight_(11, W_SEMI)
         infill_str = _seg_font(cd_text, BAR_INFILL_TEXT_COLOR, infill_font)
         cd_size = infill_str.size()
-        if fill_w > 0 and fill_w >= cd_size.width + BAR_INFILL_PADDING:
+        if (u >= MIN_INFILL_FRACTION
+                and fill_w >= cd_size.width + BAR_INFILL_PADDING):
             # Fits inside the fill: dark semibold text, right-aligned at the
             # fill's own right edge (battery-style).
             x = BAR_TRACK_X + fill_w - BAR_INFILL_INSET - cd_size.width
@@ -559,6 +588,11 @@ def _menu_bar_dark(button):
 def _title_value(rec):
     if rec["state"] == "ok":
         if rec.get("estimated"):
+            # Prefer the unclamped real fraction (spec §8) so an over-cap
+            # Gemini day reads "est. 120%" even though u5 is capped at 1.0.
+            rp = f(rec.get("pct"))
+            if rp is not None:
+                return f"est. {round(rp * 100)}%"
             return f"est. {pct(rec.get('u5'))}"
         return pct(rec.get("u5"))
     return "⚠" if rec["state"] in ("expired", "error") else "–"
@@ -663,12 +697,12 @@ class CCCBar(rumps.App):
         item._menuitem.setAttributedTitle_(attr_string)
         return item
 
-    def _bar_item(self, key, label, util, reset_epoch, estimated):
+    def _bar_item(self, key, label, util, reset_epoch, estimated, real_pct):
         # No callback: a custom-view NSMenuItem doesn't need the highlight
         # machinery a callback brings — the row isn't interactive.
         item = rumps.MenuItem(key)
-        view = BarRowView.alloc().initWithLabel_util_resetEpoch_estimated_(
-            label, util, reset_epoch, estimated)
+        view = BarRowView.alloc().initWithLabel_util_resetEpoch_estimated_pct_(
+            label, util, reset_epoch, estimated, real_pct)
         item._menuitem.setView_(view)
         return item
 
@@ -825,13 +859,15 @@ class CCCBar(rumps.App):
             # The reset countdown now lives INSIDE the drawn bar (adaptive
             # rule, spec §5b) — the separate "resets …" info row is gone.
             if label5 is not None:
+                # rec["pct"] (unclamped real fraction, spec §8) belongs to the
+                # 5h/primary window only — the u7 row never carries it.
                 rows.append(self._bar_item(
                     name + "_5h", label5, rec.get("u5"), rec.get("r5") or None,
-                    estimated))
+                    estimated, rec.get("pct")))
             if label7 is not None:
                 rows.append(self._bar_item(
                     name + "_7d", label7, rec.get("u7"), rec.get("r7") or None,
-                    estimated))
+                    estimated, None))
             if estimated:
                 rows.append(self._attr_item(
                     name + "_est", info_row("  estimated from local session logs")))

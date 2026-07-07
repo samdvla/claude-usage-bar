@@ -41,3 +41,14 @@ def test_providers_arity():
         key, setting_key, glyph_path, fetcher, fallback, labels, detect = row
         assert callable(fetcher)
         assert callable(detect)
+
+def test_title_value_real_estimated_pct():
+    m = _load()
+    # over cap: text shows the real unclamped estimate, not the capped bar value
+    assert m._title_value({"state": "ok", "estimated": True,
+                           "u5": 1.0, "pct": 1.2}) == "est. 120%"
+    # no pct field: falls back to u5
+    assert m._title_value({"state": "ok", "estimated": True,
+                           "u5": 0.12}) == "est. 12%"
+    # non-estimated records ignore pct entirely
+    assert m._title_value({"state": "ok", "u5": 0.79}) == "79%"

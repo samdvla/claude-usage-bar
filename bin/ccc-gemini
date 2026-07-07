@@ -166,6 +166,9 @@ def gemini_usage(root=None, cap=1000, now=None):
         "estimated": True,
         "count": count,
         "cap": cap,
+        # Unclamped real fraction (spec §8): the bar caps at 100% via u5,
+        # but the displayed text shows the true estimate (e.g. "est. 120%").
+        "pct": round(count / cap, 4),
     }
 
 
