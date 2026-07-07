@@ -79,9 +79,49 @@ render() {
   echo
 }
 
+codex_helper() {
+  if [ -x "$HOME/.local/bin/ccc-codex" ]; then echo "$HOME/.local/bin/ccc-codex"
+  else echo "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ccc-codex"; fi
+}
+
+render_codex() {
+  local rec state u5 u7 r5 asof c5 c7 p5 p7 agestr=""
+  rec=$(python3 "$(codex_helper)" 2>/dev/null) || return 0
+  state=$(echo "$rec" | jq -r '.state // empty' 2>/dev/null) || state=""
+  if [ "$state" != "ok" ]; then
+    echo "  ${C_BOLD}${C_CYN}codex usage${C_RST}   ${C_DIM}· no session data — run codex once${C_RST}"
+    echo
+    return 0
+  fi
+  u5=$(echo "$rec" | jq -r '.u5 // 0' 2>/dev/null) || u5=0
+  u7=$(echo "$rec" | jq -r '.u7 // 0' 2>/dev/null) || u7=0
+  r5=$(echo "$rec" | jq -r '.r5 // empty' 2>/dev/null) || r5=""
+  asof=$(echo "$rec" | jq -r '.as_of // empty' 2>/dev/null) || asof=""
+  [[ "$asof" =~ ^[0-9]+$ ]] || asof=""
+  [[ "$r5" =~ ^[0-9]+$ ]] || r5=""
+  if [ -n "$asof" ]; then
+    local age=$(( $(date +%s) - asof ))
+    [ "$age" -gt 120 ] && agestr=" · as of $((age/60))m ago"
+  fi
+  c5=$(color_for "$u5"); c7=$(color_for "$u7")
+  p5=$(awk -v u="$u5" 'BEGIN{printf "%d",u*100+0.5}'); p7=$(awk -v u="$u7" 'BEGIN{printf "%d",u*100+0.5}')
+  echo "  ${C_BOLD}${C_CYN}codex usage${C_RST}  ${C_DIM}· via session log${agestr}${C_RST}"
+  echo
+  printf "  5h  %s %s%3d%%%s\n" "$(bar "$u5" "$c5")" "$(colcode "$c5")" "$p5" "$C_RST"
+  printf "  7d  %s %s%3d%%%s\n" "$(bar "$u7" "$c7")" "$(colcode "$c7")" "$p7" "$C_RST"
+  echo
+  [ -n "$r5" ] && printf "  ${C_DIM}5h resets %s${C_RST}\n" "$(countdown "$r5")" && echo
+  return 0
+}
+
 if [ "$WATCH" = "1" ] && [ "$JSON" != "1" ]; then
   trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
   tput civis 2>/dev/null || true
-  while true; do clear; render || true
+  while true; do clear; render || true; render_codex || true
     printf "  ${C_DIM}refreshing every %ss · ctrl-c to quit${C_RST}\n" "$INTERVAL"; sleep "$INTERVAL"; done
-else render; fi
+else
+  rc=0; render || rc=$?
+  if [ "$JSON" = "1" ]; then python3 "$(codex_helper)" 2>/dev/null || true
+  else render_codex; fi
+  exit "$rc"
+fi

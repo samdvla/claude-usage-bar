@@ -48,29 +48,66 @@ return await RenderOnce(probe, json);
 static async Task<int> RenderOnce(Probe probe, bool json)
 {
     var u = await probe.FetchAsync();
+    int rc = 0;
     if (u.State == UsageState.NoLogin)
-    { Console.Error.WriteLine("\x1b[31mccc: no Claude Code login found\x1b[0m — open Claude Code"); return 1; }
-    if (u.State == UsageState.Expired)
-    { Console.Error.WriteLine("\x1b[31mccc: login expired\x1b[0m — open Claude Code"); return 1; }
-    if (u.State == UsageState.Transient)
-    { Console.Error.WriteLine("\x1b[31mccc: couldn't read usage\x1b[0m — try again shortly"); return 1; }
-
-    if (json)
+    { Console.Error.WriteLine("\x1b[31mccc: no Claude Code login found\x1b[0m — open Claude Code"); rc = 1; }
+    else if (u.State == UsageState.Expired)
+    { Console.Error.WriteLine("\x1b[31mccc: login expired\x1b[0m — open Claude Code"); rc = 1; }
+    else if (u.State == UsageState.Transient)
+    { Console.Error.WriteLine("\x1b[31mccc: couldn't read usage\x1b[0m — try again shortly"); rc = 1; }
+    else if (json)
     {
         Console.WriteLine($"{RateHeaders.Util5h}: {u.Util5h}");
         Console.WriteLine($"{RateHeaders.Util7d}: {u.Util7d}");
         Console.WriteLine($"{RateHeaders.Reset5h}: {u.Reset5h}");
         Console.WriteLine($"{RateHeaders.Reset7d}: {u.Reset7d}");
-        return 0;
+    }
+    else
+    {
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string plan = string.IsNullOrEmpty(u.Plan) ? "" : $"  \x1b[2m· {u.Plan}\x1b[0m";
+        Console.WriteLine($"\n  \x1b[1;36mclaude usage\x1b[0m{plan}\n");
+        Console.WriteLine("  5h  " + Bar(u.Util5h) + "  " + Pct(u.Util5h));
+        Console.WriteLine("  7d  " + Bar(u.Util7d) + "  " + Pct(u.Util7d));
+        Console.WriteLine($"\n  \x1b[2m5h resets {Countdown.Format(u.Reset5h, now)}\x1b[0m\n");
+    }
+
+    // Codex is a local session-log read, independent of the Claude probe —
+    // it must render even when Claude's probe failed above (NoLogin/Expired/
+    // Transient), so a broken/missing Claude Code login doesn't also hide
+    // Codex usage. Order stays Claude-then-Codex in both json and plain output.
+    RenderCodex(json);
+    return rc;
+}
+
+static void RenderCodex(bool json)
+{
+    RateUsage u;
+    try { u = new CodexSessionReader().Read(DateTimeOffset.UtcNow.ToUnixTimeSeconds()); }
+    catch { u = RateUsage.NoData(Provider.Codex); }
+
+    if (json)
+    {
+        Console.WriteLine($"codex-5h-utilization: {u.Util5h}");
+        Console.WriteLine($"codex-7d-utilization: {u.Util7d}");
+        Console.WriteLine($"codex-5h-reset: {u.Reset5h}");
+        Console.WriteLine($"codex-as-of: {u.AsOf}");
+        return;
     }
 
     long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    if (u.State != UsageState.Ok)
+    {
+        Console.WriteLine("  \x1b[1;36mcodex usage\x1b[0m  \x1b[2m· no session data — run codex once\x1b[0m\n");
+        return;
+    }
+    long age = u.AsOf is null ? 0 : now - u.AsOf.Value;
+    string ageStr = age > 120 ? $" · as of {age / 60}m ago" : "";
     string plan = string.IsNullOrEmpty(u.Plan) ? "" : $"  \x1b[2m· {u.Plan}\x1b[0m";
-    Console.WriteLine($"\n  \x1b[1;36mclaude usage\x1b[0m{plan}\n");
+    Console.WriteLine($"  \x1b[1;36mcodex usage\x1b[0m{plan}  \x1b[2m· via session log{ageStr}\x1b[0m\n");
     Console.WriteLine("  5h  " + Bar(u.Util5h) + "  " + Pct(u.Util5h));
     Console.WriteLine("  7d  " + Bar(u.Util7d) + "  " + Pct(u.Util7d));
     Console.WriteLine($"\n  \x1b[2m5h resets {Countdown.Format(u.Reset5h, now)}\x1b[0m\n");
-    return 0;
 }
 
 static string Bar(double? util)

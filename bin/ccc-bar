@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""ccc-bar — Claude usage in the macOS menu bar.
+"""ccc-bar — Claude + Codex usage in the macOS menu bar.
 
 Zero setup: if you use Claude Code, the app reads its existing OAuth token from
 your Keychain and makes one tiny probe call to read Anthropic's real
 `anthropic-ratelimit-unified-*` headers (5h/7d utilization). Nothing to sign
 into.
 
-Template terminal icon + 5h% in the bar; dropdown shows color-coded progress
-bars and the 5h reset countdown. A normal, quittable app — reopen via
+Claude and Codex each get their own menu-bar status item (glyph + 5h%); when
+a provider is hidden in Settings its item disappears, and if both are hidden
+the Claude item falls back to the template terminal icon as a reachability
+anchor. Both items share one dropdown, showing color-coded progress bars and
+the 5h reset countdown. A normal, quittable app — reopen via
 Spotlight/Applications, `open -a "Claude Usage"`, or the `ccc` CLI.
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import subprocess
@@ -19,10 +24,14 @@ import urllib.error
 import urllib.request
 
 import rumps
-from AppKit import (NSApplication, NSColor, NSFont, NSFontAttributeName,
-                    NSForegroundColorAttributeName, NSStatusBar)
-from Foundation import (NSMutableAttributedString, NSAttributedString, NSObject,
-                        NSUserDefaults)
+from AppKit import (NSApplication, NSColor, NSCompositingOperationSourceAtop,
+                    NSFont, NSFontAttributeName,
+                    NSForegroundColorAttributeName, NSImage,
+                    NSRectFillUsingOperation, NSStatusBar, NSTextAttachment,
+                    NSVariableStatusItemLength)
+from Foundation import (NSDistributedNotificationCenter, NSMakeRect,
+                        NSMakeSize, NSMutableAttributedString,
+                        NSAttributedString, NSObject, NSUserDefaults)
 from PyObjCTools import AppHelper
 
 ICON = os.path.expanduser("~/.config/ccc/icon.png")
@@ -38,8 +47,78 @@ R7_KEY = "anthropic-ratelimit-unified-7d-utilization"
 RESET5_KEY = "anthropic-ratelimit-unified-5h-reset"
 RESET7_KEY = "anthropic-ratelimit-unified-7d-reset"
 
+GLYPH_CLAUDE = os.path.expanduser("~/.config/ccc/claude-glyph.png")
+GLYPH_CODEX = os.path.expanduser("~/.config/ccc/codex-glyph.png")
+
+
+def _load_ccc_codex():
+    """ccc-codex sits next to this file (repo bin/ or ~/.local/bin)."""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ccc-codex")
+    try:
+        loader = importlib.machinery.SourceFileLoader("ccccodex", p)
+        spec = importlib.util.spec_from_loader("ccccodex", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+_CODEX = _load_ccc_codex()
+
 DEFAULTS_SUITE = "com.claude-usage-bar"
 SELFHEAL_KEY = "selfHeal"
+SHOW_CLAUDE_KEY = "showClaude"
+SHOW_CODEX_KEY = "showCodex"
+
+# NSStatusItem autosave names. macOS persists each named item's menu-bar
+# position (and, once named, its visibility) under "NSStatusItem Preferred
+# Position <name>" / "NSStatusItem Visible <name>" in standardUserDefaults
+# (required for order persistence since macOS 11 — see
+# github.com/feedback-assistant/reports/issues/151). Two hard-won rules:
+#   1. The seeded Preferred Position is only honored for a name the system
+#      has never seen, and only when the key exists BEFORE the named item is
+#      created — renaming an already-displayed item records its CURRENT slot
+#      instead (newer macOS keeps its own authoritative copy in
+#      com.apple.MenuBarAgent's TrailingItemPreferredPositions, keyed
+#      "status:<Process>::<autosaveName>").
+#   2. removeStatusItem_ DELETES the Preferred Position key, so it must be
+#      stashed before removal and restored before recreation — the same
+#      save/restore dance Stats does (exelban/stats Kit/helpers.swift
+#      saveNSStatusItemPosition/restoreNSStatusItemPosition).
+AUTOSAVE_CLAUDE = "ccc-claude-item"
+AUTOSAVE_CODEX = "ccc-codex-item"
+
+
+def _pos_key(name):
+    return "NSStatusItem Preferred Position " + name
+
+
+def _restore_pos_key(name):
+    return "NSStatusItem Restore Position " + name
+
+
+def _stash_position(name):
+    """Before removeStatusItem_: copy the position key aside (rule 2 above)."""
+    try:
+        d = NSUserDefaults.standardUserDefaults()
+        pos = d.objectForKey_(_pos_key(name))
+        if pos is not None:
+            d.setObject_forKey_(pos, _restore_pos_key(name))
+    except Exception:
+        pass
+
+
+def _unstash_position(name):
+    """Before recreating a named item: put the stashed position key back."""
+    try:
+        d = NSUserDefaults.standardUserDefaults()
+        prev = d.objectForKey_(_restore_pos_key(name))
+        if prev is not None:
+            d.setObject_forKey_(prev, _pos_key(name))
+            d.removeObjectForKey_(_restore_pos_key(name))
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- settings
@@ -59,6 +138,17 @@ def self_heal_enabled():
 
 def set_self_heal(on):
     _defaults().setBool_forKey_(bool(on), SELFHEAL_KEY)
+
+
+def provider_enabled(key):
+    d = _defaults()
+    if d.objectForKey_(key) is None:
+        return True  # both providers default ON
+    return bool(d.boolForKey_(key))
+
+
+def set_provider_enabled(key, on):
+    _defaults().setBool_forKey_(bool(on), key)
 
 
 # ---------------------------------------------------------------- claude code
@@ -130,6 +220,45 @@ def fetch():
     return {"rate_headers": headers, "plan": creds.get("subscriptionType")}
 
 
+def claude_usage():
+    """Normalize the probe result to the shared provider-record shape."""
+    data = fetch()
+    if data is None:
+        return {"state": "no_login"}
+    if data.get("error"):
+        return {"state": "expired" if data["error"] == "expired" else "error"}
+    rh = data["rate_headers"]
+
+    def _i(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    return {"state": "ok", "u5": f(rh.get(R5_KEY)), "u7": f(rh.get(R7_KEY)),
+            "r5": _i(rh.get(RESET5_KEY)), "r7": _i(rh.get(RESET7_KEY)),
+            "plan": (data.get("plan") or "").title() or None, "as_of": None}
+
+
+def codex_usage():
+    if _CODEX is None:
+        return {"state": "no_data"}
+    try:
+        return _CODEX.codex_usage()
+    except Exception:
+        return {"state": "no_data"}
+
+
+# Ordered: (record key, defaults key, glyph path, fetcher, text fallback)
+PROVIDERS = (
+    ("claude", SHOW_CLAUDE_KEY, GLYPH_CLAUDE, claude_usage, "C:"),
+    ("codex", SHOW_CODEX_KEY, GLYPH_CODEX, codex_usage, "X:"),
+)
+# key -> (glyph_path, text_fallback), for composing each provider's own
+# status-item title without re-walking PROVIDERS.
+_PROVIDER_GLYPH_FALLBACK = {key: (glyph, fb) for key, _s, glyph, _f, fb in PROVIDERS}
+
+
 # ---------------------------------------------------------------- formatting
 def f(util):
     try:
@@ -165,10 +294,23 @@ def countdown(ts):
     return f"{d // 3600}h {(d % 3600) // 60:02d}m"
 
 
-def _seg(text, color, size=12, weight=W_REG):
-    font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+def _age(ts):
+    d = max(0, int(time.time()) - int(ts))
+    if d >= 86400:
+        return f"{d // 86400}d"
+    if d >= 3600:
+        return f"{d // 3600}h {(d % 3600) // 60}m"
+    return f"{d // 60}m"
+
+
+def _seg_font(text, color, font):
     return NSAttributedString.alloc().initWithString_attributes_(
         text, {NSFontAttributeName: font, NSForegroundColorAttributeName: color})
+
+
+def _seg(text, color, size=12, weight=W_REG):
+    font = NSFont.monospacedSystemFontOfSize_weight_(size, weight)
+    return _seg_font(text, color, font)
 
 
 def bar_row(util, label, age, active):
@@ -194,6 +336,97 @@ def info_row(text):
     return _seg(text, NSColor.secondaryLabelColor(), 11, W_REG)
 
 
+_GLYPH_CACHE = {}
+_TINTED_CACHE = {}
+
+
+def _glyph(path):
+    """Base NSImage for a title glyph, or None (text fallback).
+
+    Deliberately NOT a template image: the glyph is drawn via an
+    NSTextAttachment inside an NSAttributedString title, and that text-layout
+    drawing path ignores setTemplate_ auto-tinting (it only applies when
+    NSButton/NSImageView draws the image directly). Tinting instead happens
+    explicitly in _tinted_glyph() below, per the button's effective appearance.
+    """
+    if path not in _GLYPH_CACHE:
+        img = NSImage.alloc().initWithContentsOfFile_(path)
+        if img is not None:
+            img.setSize_(NSMakeSize(15, 15))
+        _GLYPH_CACHE[path] = img
+    return _GLYPH_CACHE[path]
+
+
+def _tinted_copy(img, color):
+    """A solid-color copy of a black-on-transparent glyph (alpha preserved)."""
+    t = img.copy()
+    t.lockFocus()
+    color.set()
+    NSRectFillUsingOperation(((0, 0), t.size()), NSCompositingOperationSourceAtop)
+    t.unlockFocus()
+    return t
+
+
+def _tinted_glyph(path, dark):
+    """Cached white (dark menu bar) or black (light menu bar) glyph variant."""
+    key = (path, dark)
+    if key not in _TINTED_CACHE:
+        base = _glyph(path)
+        _TINTED_CACHE[key] = None if base is None else _tinted_copy(
+            base, NSColor.whiteColor() if dark else NSColor.blackColor())
+    return _TINTED_CACHE[key]
+
+
+def _menu_bar_dark(button):
+    """Best-effort read of whether the status item currently sits on a dark
+    (Dark Aqua) menu bar, from the button's effective appearance."""
+    try:
+        ap = button.effectiveAppearance()
+        name = ap.bestMatchFromAppearancesWithNames_(
+            ["NSAppearanceNameAqua", "NSAppearanceNameDarkAqua"])
+        return name == "NSAppearanceNameDarkAqua"
+    except Exception:
+        return True  # menu bars are most often dark; white glyph is the safer default
+
+
+def _title_value(rec):
+    if rec["state"] == "ok":
+        return pct(rec.get("u5"))
+    return "⚠" if rec["state"] in ("expired", "error") else "–"
+
+
+def title_attr_string(entries, button):
+    """entries: [(glyph_path, text_fallback, rec)] → attributed title.
+
+    Each provider now lives on its own status item, so `entries` is always a
+    single-entry list — the signature stays (entries, button) so both the
+    Claude and Codex status items can share this same composer. Glyph images
+    ride in NSTextAttachments (bounds y-offset centers them on the menu-bar
+    text baseline) and are tinted white/black to match the button's current
+    (light/dark) menu-bar appearance, since the attachment drawing path
+    doesn't honor NSImage template auto-tinting. Values use the system
+    menu-bar font with monospaced digits (native SF Pro, matches the rest of
+    the menu bar — no SF Mono width jitter).
+    """
+    dark = _menu_bar_dark(button)
+    size = NSFont.menuBarFontOfSize_(0).pointSize()
+    font = NSFont.monospacedDigitSystemFontOfSize_weight_(size, W_REG)
+    color = NSColor.labelColor()
+    s = NSMutableAttributedString.alloc().init()
+    for glyph_path, fallback, rec in entries:
+        img = _tinted_glyph(glyph_path, dark)
+        if img is not None:
+            att = NSTextAttachment.alloc().init()
+            att.setImage_(img)
+            att.setBounds_(NSMakeRect(0, -3, 15, 15))
+            s.appendAttributedString_(
+                NSAttributedString.attributedStringWithAttachment_(att))
+            s.appendAttributedString_(_seg_font(" " + _title_value(rec), color, font))
+        else:
+            s.appendAttributedString_(_seg_font(fallback + _title_value(rec), color, font))
+    return s
+
+
 # ---------------------------------------------------------------- the app
 _APP = None
 
@@ -203,6 +436,12 @@ class _MenuDelegate(NSObject):
     def menuWillOpen_(self, menu):
         if _APP is not None:
             _APP.refresh(None)
+
+    def themeChanged_(self, note):
+        # Light/dark menu bar switch — repaint the title so glyphs re-tint
+        # promptly instead of waiting for the next periodic tick.
+        if _APP is not None:
+            AppHelper.callAfter(_APP.refresh, None)
 
 
 class CCCBar(rumps.App):
@@ -217,10 +456,16 @@ class CCCBar(rumps.App):
             pass
         _APP = self
         self._refreshing = False
+        self._refresh_again = False
         self._restoring = False
         self._rebuild_menu_next = True
+        self._codex_item = None  # lazily-created second NSStatusItem
+        self._claude_positioned = False  # rumps item renamed-at-creation yet?
         self._menu_delegate = _MenuDelegate.alloc().init()
         self._delegate_attached = False
+        NSDistributedNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self._menu_delegate, "themeChanged:",
+            "AppleInterfaceThemeChangedNotification", None)
         # Background ticks update only the menu-bar title (cheap, in place); they
         # do NOT rebuild the dropdown. The dropdown rebuilds on open / manual
         # refresh / after a wake-recreate.
@@ -241,6 +486,78 @@ class CCCBar(rumps.App):
         except Exception:
             pass
 
+    def _seed_positions(self):
+        # First run only (no remembered position for an autosave name yet):
+        # pin BOTH items' preferred positions as an adjacent pair. Preferred
+        # positions are distances from the screen's right edge; the system
+        # orders items by these values but respects other apps' already-
+        # occupied zones, so a pair seeded next to (or straddling) another
+        # app's remembered slot gets SPLIT around it. Seeding into an empty
+        # band well left of the usual status-item cluster avoids any
+        # occupied-zone conflict: with only our two values in that band and
+        # just 1pt apart, nothing can slot between them, and packing pulls
+        # the pair flush against the existing cluster (claude left of codex,
+        # since larger = further left). Once a key exists (seeded or
+        # user-dragged), it is never touched again. Must run BEFORE the named
+        # items are created (see rule 1 at the AUTOSAVE_* definitions).
+        try:
+            d = NSUserDefaults.standardUserDefaults()
+            if d.objectForKey_(_pos_key(AUTOSAVE_CLAUDE)) is None:
+                d.setFloat_forKey_(600.0, _pos_key(AUTOSAVE_CLAUDE))
+            if d.objectForKey_(_pos_key(AUTOSAVE_CODEX)) is None:
+                d.setFloat_forKey_(599.0, _pos_key(AUTOSAVE_CODEX))
+        except Exception:
+            pass  # defaults hiccup: default placement is the fallback
+
+    def _recreate_claude_item(self, placeholder=None):
+        # Replace the rumps-made status item with one whose autosave name is
+        # attached at creation, before any content. rumps' initializeStatusBar
+        # sets title/icon before we ever get to rename, and a rename after
+        # display records the item's current slot rather than moving it to
+        # the persisted one (rule 1 at the AUTOSAVE_* definitions) — so the
+        # only reliable way to give the rumps item a positioned name is a
+        # name-first recreation.
+        bar = NSStatusBar.systemStatusBar()
+        old = getattr(self._nsapp, "nsstatusitem", None)
+        if old is not None:
+            _stash_position(AUTOSAVE_CLAUDE)  # removal deletes the pos key
+            bar.removeStatusItem_(old)
+        _unstash_position(AUTOSAVE_CLAUDE)
+        item = bar.statusItemWithLength_(NSVariableStatusItemLength)
+        item.setAutosaveName_(AUTOSAVE_CLAUDE)  # must precede any content
+        item.setHighlightMode_(True)
+        item.setMenu_(self._menu._menu)
+        if placeholder:
+            item.setTitle_(placeholder)
+        self._nsapp.nsstatusitem = item  # rumps title/icon setters follow it
+        self._claude_positioned = True
+        return item
+
+    def _remove_codex_item(self):
+        if self._codex_item is not None:
+            _stash_position(AUTOSAVE_CODEX)  # removal deletes the pos key
+            NSStatusBar.systemStatusBar().removeStatusItem_(self._codex_item)
+            self._codex_item = None
+
+    def _ensure_codex_item(self):
+        # Lazily create the second (Codex) status item; keep a strong Python
+        # reference — statusItemWithLength_ returns an autoreleased object
+        # that otherwise vanishes. Shares the one rumps NSMenu instance so
+        # both items open the same dropdown.
+        if self._codex_item is None:
+            _unstash_position(AUTOSAVE_CODEX)
+            self._seed_positions()  # no-op once seeded
+            item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+                NSVariableStatusItemLength)
+            item.setAutosaveName_(AUTOSAVE_CODEX)
+            # Autosave names also persist visibility; assert shown so a stale
+            # "NSStatusItem Visible <name>" = NO can't resurrect it hidden.
+            item.setVisible_(True)
+            item.setHighlightMode_(True)
+            item.setMenu_(self._menu._menu)
+            self._codex_item = item
+        return self._codex_item
+
     def noop(self, _):
         pass
 
@@ -250,40 +567,34 @@ class CCCBar(rumps.App):
         return item
 
     def _menu_tail(self):
+        settings = rumps.MenuItem("Settings")
+        show_c = rumps.MenuItem("Show Claude",
+                                callback=lambda s: self._toggle_provider(s, SHOW_CLAUDE_KEY))
+        show_c.state = 1 if provider_enabled(SHOW_CLAUDE_KEY) else 0
+        show_x = rumps.MenuItem("Show Codex",
+                                callback=lambda s: self._toggle_provider(s, SHOW_CODEX_KEY))
+        show_x.state = 1 if provider_enabled(SHOW_CODEX_KEY) else 0
         heal = rumps.MenuItem("Auto-restore icon", callback=self.toggle_self_heal)
         heal.state = 1 if self_heal_enabled() else 0
+        settings.update([show_c, show_x, heal])
         return [
             None,
             rumps.MenuItem("Refresh now", callback=self.refresh),
-            heal,
+            settings,
             rumps.MenuItem("Open in Terminal", callback=self.open_terminal),
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
-
-    def _show(self, header_rows, reset_ts, reset7_ts=None, subtitle=None):
-        head = "Claude usage" + (f"  ·  {subtitle}" if subtitle else "")
-        items = [self._attr_item("hdr", info_row(head)), None]
-        items += header_rows
-        items.append(None)
-        items.append(self._attr_item("reset5h", info_row(f"5h resets in {countdown(reset_ts)}")))
-        if reset7_ts is not None:
-            items.append(self._attr_item("reset7d", info_row(f"7d resets in {countdown(reset7_ts)}")))
-        items += self._menu_tail()
-        self.menu.clear()
-        self.menu = items
-        self._attach_open_delegate()
-
-    def _show_message(self, text):
-        items = [self._attr_item("msg", info_row(text))]
-        items += self._menu_tail()
-        self.menu.clear()
-        self.menu = items
-        self._attach_open_delegate()
 
     def refresh(self, _, rebuild_menu=True):
         # Probe is a network call — run it off the main thread so opening the
         # menu never blocks. Apply the result back on the main thread.
         if self._refreshing:
+            # A refresh is already in flight (e.g. the dropdown-open probe) —
+            # this call would otherwise be silently dropped. Queue it so a
+            # toggle/manual refresh that lands mid-probe still takes effect
+            # once the in-flight one finishes, instead of waiting up to
+            # REFRESH_SECONDS for the next periodic tick.
+            self._refresh_again = True
             return
         self._refreshing = True
         self._rebuild_menu_next = rebuild_menu
@@ -300,62 +611,193 @@ class CCCBar(rumps.App):
             AppHelper.callAfter(self._restore_status_item)
 
     def _restore_status_item(self):
-        # Remove the (possibly evicted) status item and make a fresh one, so the
-        # icon is guaranteed present after a wake. Guarded against re-entry.
+        # Remove the (possibly evicted) status item(s) and make fresh ones, so
+        # the icon is guaranteed present after a wake. Guarded against re-entry.
+        # No in-process way to detect eviction, so both items are recreated
+        # unconditionally rather than only the ones that look "gone".
         if self._restoring:
             return
         self._restoring = True
         try:
-            old = getattr(self._nsapp, "nsstatusitem", None)
-            if old is not None:
-                NSStatusBar.systemStatusBar().removeStatusItem_(old)
-            self._nsapp.initializeStatusBar()
+            # Name-first recreate keeps the remembered position; a visible
+            # placeholder title bridges the gap until _apply repaints (the
+            # probe is a network call). Visibility is set explicitly (same
+            # rule as _apply: shown unless Claude is off while Codex is on) —
+            # autosaved visibility must never be left to defaults.
+            item = self._recreate_claude_item(" …")
+            item.setVisible_(
+                provider_enabled(SHOW_CLAUDE_KEY)
+                or not provider_enabled(SHOW_CODEX_KEY))
             self._delegate_attached = False
+            self._remove_codex_item()
+            if provider_enabled(SHOW_CODEX_KEY):
+                self._ensure_codex_item()
         except Exception:
             pass
         finally:
             self._restoring = False
-        self.refresh(None)  # repaint title + rebuild dropdown on the fresh item
+        self.refresh(None)  # repaint title(s) + rebuild dropdown on the fresh item(s)
 
     def _refresh_worker(self):
         try:
-            data = fetch()
+            # Fetch only enabled providers — a hidden Claude means no probe
+            # call at all (saves the token + the rate-limit ping).
+            data = {}
+            for key, setting, _glyph_path, fetcher, _fb in PROVIDERS:
+                if provider_enabled(setting):
+                    data[key] = fetcher()
         finally:
             self._refreshing = False
         AppHelper.callAfter(self._apply, data)
 
     def _apply(self, data):
         rebuild = self._rebuild_menu_next
-        if data is None:
-            self.title = " –"
-            if rebuild:
-                self._show_message("No Claude Code login found — open Claude Code.")
-            return
-        if data.get("error"):
-            self.title = " ⚠"
-            if rebuild:
-                msg = ("Claude Code login expired — open Claude Code to refresh"
-                       if data["error"] == "expired"
-                       else "Couldn't read usage — try again shortly")
-                self._show_message(msg)
-            return
+        claude_enabled = "claude" in data
+        codex_enabled = "codex" in data
+        claude_item = self._nsapp.nsstatusitem
+        # Seed first-run positions BEFORE the autosave name attaches. The
+        # rumps item only exists once run() has started; _apply (via
+        # callAfter) is the first main-thread hook after that.
+        self._seed_positions()
+        claude_recreated = False
+        if not self._claude_positioned:
+            # Renaming an already-displayed NSStatusItem does NOT move it to
+            # the name's persisted position, so once per launch replace the
+            # rumps-made item with a name-first recreation (see
+            # _recreate_claude_item).
+            try:
+                claude_item = self._recreate_claude_item()
+                claude_recreated = True
+            except Exception:
+                self._claude_positioned = True  # don't retry every pass
 
-        rh = data["rate_headers"]
-        u5, u7 = rh.get(R5_KEY), rh.get(R7_KEY)
-        self.title = " " + pct(u5)
+        # -- Claude item: the rumps-managed status item. Since the autosave
+        # name makes macOS persist visibility, it is asserted explicitly BOTH
+        # ways on every pass — never left to defaults. --
+        if claude_enabled:
+            claude_item.setVisible_(True)
+            self.icon = None
+            self.title = ""  # rumps clears the plain title...
+            glyph_c, fb_c = _PROVIDER_GLYPH_FALLBACK["claude"]
+            rec_c = data["claude"]
+
+            def _paint_claude(glyph=glyph_c, fb=fb_c, rec=rec_c, item=claude_item):
+                try:              # ...then the attributed one paints over it.
+                    btn = item.button()
+                    btn.setAttributedTitle_(
+                        title_attr_string([(glyph, fb, rec)], btn))
+                except Exception:
+                    # No button API (very old macOS) — plain-text fallback.
+                    self.title = fb + _title_value(rec)
+
+            _paint_claude()
+            if claude_recreated:
+                # A just-created button may not have resolved its effective
+                # (light/dark) appearance yet, so the first tint can come out
+                # wrong (invisible glyph). One delayed repaint fixes it.
+                AppHelper.callLater(0.5, _paint_claude)
+        elif codex_enabled:
+            # Codex has its own item now; this one isn't needed as an anchor.
+            claude_item.setVisible_(False)
+        else:
+            # Both providers hidden: keep this item visible with the app icon
+            # so there's still a clickable reachability anchor in the bar.
+            claude_item.setVisible_(True)
+            self.icon = ICON if os.path.exists(ICON) else None
+            self.title = ""
+
+        # -- Codex item: a second, manually managed status item. --
+        if codex_enabled:
+            created = self._codex_item is None
+            item = self._ensure_codex_item()
+            item.setVisible_(True)
+            glyph_x, fb_x = _PROVIDER_GLYPH_FALLBACK["codex"]
+
+            def _paint_codex(glyph=glyph_x, fb=fb_x, rec=data["codex"], item=item):
+                try:
+                    btn = item.button()
+                    btn.setAttributedTitle_(
+                        title_attr_string([(glyph, fb, rec)], btn))
+                except Exception:
+                    # No button API (very old macOS) — plain-text fallback.
+                    item.setTitle_(fb + _title_value(rec))
+
+            _paint_codex()
+            if created:
+                # Same first-tint race as the claude item above.
+                AppHelper.callLater(0.5, _paint_codex)
+        else:
+            self._remove_codex_item()
+
         if rebuild:
-            plan = (data.get("plan") or "").title()
-            rows = [
-                self._attr_item("c5h", bar_row(u5, "5h", "", True)),
-                self._attr_item("c7d", bar_row(u7, "7d", "", True)),
-            ]
-            self._show(rows, rh.get(RESET5_KEY), rh.get(RESET7_KEY), subtitle=plan)
+            self._show(data)
+
+        if self._refresh_again:
+            # A refresh landed while this one was in flight (see refresh()) —
+            # run it now that painting is done, rather than dropping it.
+            self._refresh_again = False
+            self.refresh(None)
+
+    def _section_rows(self, name, rec):
+        rows = []
+        head = name + (f" · {rec['plan']}" if rec.get("plan") else "")
+        as_of = rec.get("as_of")
+        if as_of and time.time() - as_of > REFRESH_SECONDS:
+            head += f"   · as of {_age(as_of)} ago"
+        rows.append(self._attr_item(name + "_hdr", info_row(head)))
+        state = rec["state"]
+        if state == "ok":
+            rows.append(self._attr_item(name + "_5h", bar_row(rec.get("u5"), "  5h", "", True)))
+            rows.append(self._attr_item(name + "_7d", bar_row(rec.get("u7"), "  7d", "", True)))
+            resets = []
+            if rec.get("r5"):
+                resets.append(f"5h in {countdown(rec['r5'])}")
+            if rec.get("r7"):
+                resets.append(f"7d in {countdown(rec['r7'])}")
+            if resets:
+                rows.append(self._attr_item(name + "_rst",
+                                            info_row("  resets " + " · ".join(resets))))
+        else:
+            msg = {
+                "no_login": "  No Claude Code login found — open Claude Code",
+                "expired": "  Login expired — open Claude Code to refresh",
+                "no_data": "  No Codex sessions found — run codex once",
+            }.get(state, "  Couldn't read usage — try again shortly")
+            rows.append(self._attr_item(name + "_err", info_row(msg)))
+        return rows
+
+    def _show(self, data):
+        items = [self._attr_item("hdr", info_row("usage")), None]
+        first = True
+        for key, setting, _g, _f, _fb in PROVIDERS:
+            if key not in data:
+                continue
+            if not first:
+                items.append(None)
+            first = False
+            items += self._section_rows(key.title(), data[key])
+        if first:  # nothing enabled
+            items.append(self._attr_item("none", info_row("All providers hidden — Settings ▸")))
+        items += self._menu_tail()
+        self.menu.clear()
+        self.menu = items
+        self._attach_open_delegate()
+        # Idempotent: the shared NSMenu instance is stable across rebuilds,
+        # but re-assert in case the Codex item was just (re)created.
+        if self._codex_item is not None:
+            self._codex_item.setMenu_(self._menu._menu)
 
     # --------------------------------------------------- menu actions
     def toggle_self_heal(self, sender):
         new = not self_heal_enabled()
         set_self_heal(new)
         sender.state = 1 if new else 0
+
+    def _toggle_provider(self, sender, key):
+        new = not provider_enabled(key)
+        set_provider_enabled(key, new)
+        sender.state = 1 if new else 0
+        self.refresh(None)  # repaint title + dropdown immediately
 
     def open_terminal(self, _):
         subprocess.Popen(

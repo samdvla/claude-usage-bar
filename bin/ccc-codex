@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""ccc-codex — read OpenAI Codex usage from its local session logs.
+
+Codex CLI writes a `rate_limits` snapshot into
+~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl on every turn. This module finds
+the newest snapshot and normalizes it to the same record shape ccc uses for
+Claude: fractions for the 5h (primary) and 7d (secondary) windows, reset
+epochs, plan, and the snapshot's age. Stdlib only — imported by ccc-bar and
+invoked as `python3 ccc-codex` by the ccc CLI (prints the record as JSON).
+
+If a window's resets_at is already in the past the snapshot predates the
+current window, so that window reports 0.0 (usage since the reset is unknown
+but starts from zero) and its reset is dropped.
+"""
+import json
+import os
+import time
+from datetime import datetime
+
+CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+TAIL_BYTES = 64 * 1024
+MAX_FILES = 3
+
+
+def _mtime(p):
+    """Safe mtime: returns 0.0 if file missing or unreadable (race-safe sort key)."""
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return 0.0
+
+
+def _session_files(root, limit=MAX_FILES):
+    """Newest rollout-*.jsonl paths, newest day first, mtime-desc within a day."""
+    out = []
+    try:
+        years = sorted((d for d in os.listdir(root) if d.isdigit()), reverse=True)
+    except OSError:
+        return out
+    for y in years:
+        ydir = os.path.join(root, y)
+        try:
+            months = sorted(os.listdir(ydir), reverse=True)
+        except OSError:
+            continue
+        for mo in months:
+            mdir = os.path.join(ydir, mo)
+            if not os.path.isdir(mdir):
+                continue
+            try:
+                days = sorted(os.listdir(mdir), reverse=True)
+            except OSError:
+                continue
+            for day in days:
+                ddir = os.path.join(mdir, day)
+                if not os.path.isdir(ddir):
+                    continue
+                try:
+                    fs = [os.path.join(ddir, f) for f in os.listdir(ddir)
+                          if f.startswith("rollout-") and f.endswith(".jsonl")]
+                except OSError:
+                    continue
+                fs.sort(key=_mtime, reverse=True)
+                out.extend(fs)
+                if len(out) >= limit:
+                    return out[:limit]
+    return out[:limit]
+
+
+def _last_rate_limits(path):
+    """(rate_limits dict, iso timestamp) from the last parseable event, or None."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - TAIL_BYTES))
+            chunk = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in reversed(chunk.splitlines()):
+        if '"rate_limits"' not in line:
+            continue
+        try:
+            ev = json.loads(line)
+            rl = ev["payload"]["rate_limits"]
+            if not isinstance(rl, dict) or "primary" not in rl:
+                continue
+            return rl, ev.get("timestamp")
+        except (ValueError, KeyError, TypeError):
+            continue
+    return None
+
+
+def _parse_iso(ts):
+    try:
+        return int(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp())
+    except (AttributeError, ValueError, TypeError):
+        return None
+
+
+def codex_usage(root=None, now=None):
+    """Normalized Codex usage record; see module docstring for semantics."""
+    root = CODEX_SESSIONS if root is None else root
+    now = int(time.time()) if now is None else now
+    for path in _session_files(root):
+        hit = _last_rate_limits(path)
+        if hit is None:
+            continue
+        rl, ts = hit
+        rec = {"state": "ok",
+               "plan": (rl.get("plan_type") or "").title() or None,
+               "as_of": _parse_iso(ts)}
+        for wkey, ukey, rkey in (("primary", "u5", "r5"), ("secondary", "u7", "r7")):
+            w = rl.get(wkey) or {}
+            u, r = w.get("used_percent"), w.get("resets_at")
+            if r is not None and now > r:
+                u, r = 0.0, None
+            rec[ukey] = None if u is None else round(u / 100.0, 4)
+            rec[rkey] = r
+        return rec
+    return {"state": "no_data"}
+
+
+if __name__ == "__main__":
+    print(json.dumps(codex_usage()))

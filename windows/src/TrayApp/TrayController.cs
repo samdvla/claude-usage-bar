@@ -21,16 +21,31 @@ public sealed class TrayController : IDisposable
     private Icon? _currentIcon;
     private RateUsage _last = RateUsage.Transient();
 
+    private const string SettingsKey = @"Software\ClaudeUsageBar";
+    private NotifyIcon? _trayCodex;
+    private readonly CodexSessionReader _codexReader = new();
+    private RateUsage _lastCodex = RateUsage.NoData(Provider.Codex);
+    private Icon? _currentCodexIcon;
+    private ToolStripMenuItem _showClaude = null!;
+    private ToolStripMenuItem _showCodex = null!;
+
     public TrayController()
     {
-        _tray.Visible = true;
+        _tray.Visible = GetShow("ShowClaude");
         _tray.Text = "Claude usage";
         ApplyIcon(null);
+
+        _showClaude = new ToolStripMenuItem("Show Claude icon", null, (_, _) => ToggleShow(Provider.Claude))
+        { Checked = GetShow("ShowClaude") };
+        _showCodex = new ToolStripMenuItem("Show Codex icon", null, (_, _) => ToggleShow(Provider.Codex))
+        { Checked = GetShow("ShowCodex") };
 
         _autostart = new ToolStripMenuItem("Auto-start at login", null, (_, _) => ToggleAutostart())
         { Checked = IsAutostartEnabled() };
         _menu.Items.Add(new ToolStripMenuItem("Refresh now", null, (_, _) => Refresh()));
         _menu.Items.Add(_autostart);
+        _menu.Items.Add(_showClaude);
+        _menu.Items.Add(_showCodex);
         _menu.Items.Add(new ToolStripMenuItem("Open in Terminal", null, (_, _) => OpenTerminal()));
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add(new ToolStripMenuItem("Quit", null, (_, _) => Application.Exit()));
@@ -40,6 +55,14 @@ public sealed class TrayController : IDisposable
             if (e.Button == MouseButtons.Left) ToggleFlyout();
             else if (e.Button == MouseButtons.Right) _menu.Show(Cursor.Position);
         };
+
+        _trayCodex = new NotifyIcon { Visible = GetShow("ShowCodex"), Text = "Codex usage" };
+        _trayCodex.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) ToggleFlyout();
+            else if (e.Button == MouseButtons.Right) _menu.Show(Cursor.Position);
+        };
+        ApplyCodexIcon(RateUsage.NoData(Provider.Codex));
 
         _timer.Interval = RefreshMs;
         _timer.Tick += (_, _) => Refresh();
@@ -92,7 +115,12 @@ public sealed class TrayController : IDisposable
             {
                 // Force the shell to re-read the promotion state.
                 _tray.Visible = false;
-                _tray.Visible = true;
+                _tray.Visible = GetShow("ShowClaude");
+                if (_trayCodex is not null)
+                {
+                    _trayCodex.Visible = false;
+                    _trayCodex.Visible = GetShow("ShowCodex");
+                }
             }
         }
         catch { /* best effort */ }
@@ -103,7 +131,7 @@ public sealed class TrayController : IDisposable
         _theme.Refresh();
         if (_flyout is { Visible: true }) { _flyout.Hide(); return; }
         _flyout ??= BuildFlyout();
-        _flyout.Render(_last);
+        RenderFlyout();
         _flyout.ShowAt(Cursor.Position);
         Refresh(); // probe fresh on open, like the macOS menuWillOpen_
     }
@@ -124,14 +152,26 @@ public sealed class TrayController : IDisposable
         // stop overlapping probes (timer + manual + flyout-open) from piling up.
         if (_refreshing) return;
         _refreshing = true;
-        RateUsage u;
-        try { u = await _probe.FetchAsync(); }
+        RateUsage u = _last;
+        try
+        {
+            // Hidden Claude icon = no Claude API call at all — parity with the
+            // macOS app's "hidden provider = no probe" behavior (saves the
+            // token round trip + the rate-limit ping when only Codex is shown).
+            if (GetShow("ShowClaude")) u = await _probe.FetchAsync();
+        }
         catch { u = RateUsage.Transient(); }
         finally { _refreshing = false; }
         _last = u;
+        try { _lastCodex = _codexReader.Read(DateTimeOffset.UtcNow.ToUnixTimeSeconds()); }
+        catch { _lastCodex = RateUsage.NoData(Provider.Codex); }
         ApplyIcon(u);
-        if (_flyout is { Visible: true }) _flyout.Render(u);
+        ApplyCodexIcon(_lastCodex);
+        if (_flyout is { Visible: true }) RenderFlyout();
     }
+
+    private void RenderFlyout() =>
+        _flyout!.Render(_last, GetShow("ShowCodex") ? _lastCodex : null);
 
     private void ApplyIcon(RateUsage? u)
     {
@@ -141,6 +181,19 @@ public sealed class TrayController : IDisposable
         _currentIcon?.Dispose();
         _currentIcon = newIcon;
         _tray.Text = TooltipFor(u);
+    }
+
+    private void ApplyCodexIcon(RateUsage u)
+    {
+        if (_trayCodex is null) return;
+        double? util = u.State == UsageState.Ok ? u.Util5h : null;
+        var icon = IconRenderer.Render(util, _theme.Dark, Provider.Codex);
+        _trayCodex.Icon = icon;
+        _currentCodexIcon?.Dispose();
+        _currentCodexIcon = icon;
+        _trayCodex.Text = u.State == UsageState.Ok
+            ? $"Codex usage{(string.IsNullOrEmpty(u.Plan) ? "" : " · " + u.Plan)} — 5h {Pct(u.Util5h)} · 7d {Pct(u.Util7d)}"
+            : "Codex usage — no session data";
     }
 
     private static string TooltipFor(RateUsage? u) => u?.State switch
@@ -181,12 +234,46 @@ public sealed class TrayController : IDisposable
         _autostart.Checked = IsAutostartEnabled();
     }
 
+    private static bool GetShow(string name)
+    {
+        using var k = Registry.CurrentUser.OpenSubKey(SettingsKey);
+        return (k?.GetValue(name) as int?) != 0;   // absent → 1 (on)
+    }
+
+    private static void SetShow(string name, bool on)
+    {
+        using var k = Registry.CurrentUser.CreateSubKey(SettingsKey);
+        k.SetValue(name, on ? 1 : 0, RegistryValueKind.DWord);
+    }
+
+    private void ToggleShow(Provider p)
+    {
+        bool claude = GetShow("ShowClaude"), codex = GetShow("ShowCodex");
+        if (p == Provider.Claude)
+        {
+            if (claude && !codex) return;          // would hide the last icon
+            claude = !claude; SetShow("ShowClaude", claude);
+        }
+        else
+        {
+            if (codex && !claude) return;
+            codex = !codex; SetShow("ShowCodex", codex);
+        }
+        _showClaude.Checked = claude; _showCodex.Checked = codex;
+        _tray.Visible = claude;
+        if (_trayCodex is not null) _trayCodex.Visible = codex;
+        Refresh();
+    }
+
     public void Dispose()
     {
         _timer.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         _currentIcon?.Dispose();
+        if (_trayCodex is not null) _trayCodex.Visible = false;
+        _trayCodex?.Dispose();
+        _currentCodexIcon?.Dispose();
         _flyout?.Dispose();
         _menu.Dispose();
         _probe.Dispose();
