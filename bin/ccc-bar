@@ -417,10 +417,7 @@ class CCCBar(rumps.App):
         self._rebuild_menu_next = True
         self._menu_delegate = _MenuDelegate.alloc().init()
         self._delegate_attached = False
-        try:
-            self._nsapp.nsstatusitem.setAutosaveName_(AUTOSAVE_CLAUDE)
-        except Exception:
-            pass
+        self._autosave_applied = False
         NSDistributedNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self._menu_delegate, "themeChanged:",
             "AppleInterfaceThemeChangedNotification", None)
@@ -535,6 +532,16 @@ class CCCBar(rumps.App):
         AppHelper.callAfter(self._apply, data)
 
     def _apply(self, data):
+        if not self._autosave_applied:
+            # The rumps status item only exists once run() has started
+            # (rumps assigns self._nsapp inside run(), after __init__), and
+            # _apply — via callAfter — is the first main-thread hook after
+            # that, so the autosave name is attached here, once per launch.
+            try:
+                self._nsapp.nsstatusitem.setAutosaveName_(AUTOSAVE_CLAUDE)
+                self._autosave_applied = True
+            except Exception:
+                pass
         rebuild = self._rebuild_menu_next
         entries = [(g, fb, data[k]) for k, s, g, fetch_, fb in PROVIDERS
                    if k in data]
