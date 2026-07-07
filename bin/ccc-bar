@@ -26,22 +26,47 @@ import time
 import urllib.error
 import urllib.request
 
+import objc
 import rumps
-from AppKit import (NSApplication, NSColor, NSCompositingOperationSourceAtop,
-                    NSFont, NSFontAttributeName,
-                    NSForegroundColorAttributeName, NSImage,
-                    NSRectFillUsingOperation, NSStatusBar, NSTextAttachment)
-from Foundation import (NSDistributedNotificationCenter, NSMakeRect,
-                        NSMakeSize, NSMutableAttributedString,
+from AppKit import (NSApplication, NSBezierPath, NSColor,
+                    NSCompositingOperationSourceAtop, NSFont,
+                    NSFontAttributeName, NSForegroundColorAttributeName,
+                    NSGraphicsContext, NSImage, NSRectFill,
+                    NSRectFillUsingOperation, NSStatusBar, NSTextAttachment,
+                    NSView)
+from Foundation import (NSDistributedNotificationCenter, NSMakePoint,
+                        NSMakeRect, NSMakeSize, NSMutableAttributedString,
                         NSAttributedString, NSObject, NSUserDefaults)
 from PyObjCTools import AppHelper
 
 ICON = os.path.expanduser("~/.config/ccc/icon.png")
 REFRESH_SECONDS = 120
 HTTP_TIMEOUT = 20
-BAR_WIDTH = 12
 W_REG, W_SEMI = 0.0, 0.3
 SEGMENT_GAP = "   "  # uniform gap between provider segments in the title
+
+# ------------------------------------------------------------- bar row geometry
+# Drawn dropdown bar row (mockup variation C, spec 2026-07-06 §5b). All values
+# are the row's own view-local coordinates; the view is flipped (see
+# BarRowView.isFlipped) so y grows downward from the row's top edge.
+BAR_ROW_W = 300
+BAR_ROW_H = 26
+# Track start: the label column's widest possible value is "month" (the
+# longest of the fixed label set 5h/7d/month/day), which measures ~37pt at
+# 12pt semibold — verified directly with NSAttributedString.size() during
+# development, since a naive ~30pt guess clipped it into "montl". 2pt left
+# inset + ~37pt text + ~5pt breathing room before the track.
+BAR_TRACK_X = 44
+BAR_TRACK_RIGHT_MARGIN = 56  # track ends at (width - this); rest is the % column
+BAR_TRACK_H = 17
+BAR_TRACK_RADIUS = 5.0
+BAR_PCT_GAP = 4           # gap between track's right edge and the % text region
+BAR_RIGHT_PAD = 6         # inset from the view's right edge to the % text
+BAR_INFILL_INSET = 7      # inset from an edge (fill or track) for countdown text
+BAR_INFILL_PADDING = 14   # adaptive rule: fill must be >= text width + this
+# Dark, semibold countdown text drawn INSIDE a colored fill (battery-style).
+BAR_INFILL_TEXT_COLOR = NSColor.colorWithCalibratedRed_green_blue_alpha_(
+    0x1A / 255.0, 0x1A / 255.0, 0x1E / 255.0, 0.72)
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 ANTHROPIC_MESSAGES = "https://api.anthropic.com/v1/messages"
@@ -329,23 +354,123 @@ def _seg(text, color, size=12, weight=W_REG):
     return _seg_font(text, color, font)
 
 
-def bar_row(util, label, age, active):
-    u = f(util) or 0.0
-    filled = max(0, min(BAR_WIDTH, round(u * BAR_WIDTH)))
-    primary = NSColor.labelColor()
-    secondary = NSColor.secondaryLabelColor()
-    dim = NSColor.tertiaryLabelColor()
-    hc = health_color(util)
-    s = NSMutableAttributedString.alloc().init()
-    s.appendAttributedString_(_seg(
-        f"{label:<7}", primary if active else secondary, 12,
-        W_SEMI if active else W_REG))
-    s.appendAttributedString_(_seg("█" * filled, hc))
-    s.appendAttributedString_(_seg("░" * (BAR_WIDTH - filled), dim))
-    s.appendAttributedString_(_seg(f"  {pct(util):>4}", hc, 12, W_SEMI))
-    if age:
-        s.appendAttributedString_(_seg(f"   · {age}", dim, 11))
-    return s
+class BarRowView(NSView):
+    """One drawn usage-bar row (mockup variation C): label, rounded track with
+    a health-color fill, an adaptive in-bar reset countdown, and the percent
+    outside the track. Used as a dropdown NSMenuItem's custom view via
+    `setView_`; all geometry lives in the BAR_* module constants above.
+
+    No timers/animation here — the menu rebuilds the view from scratch on
+    every refresh, so drawRect_ only ever needs to render one static frame.
+    """
+
+    def initWithLabel_util_resetEpoch_estimated_(self, label_text, util,
+                                                  reset_epoch, estimated):
+        # objc.super (not plain super()) — a custom-named PyObjC initializer
+        # calling an inherited selector other than its own name needs the
+        # explicit ObjC super proxy, or the call raises AttributeError.
+        self = objc.super(BarRowView, self).initWithFrame_(
+            NSMakeRect(0, 0, BAR_ROW_W, BAR_ROW_H))
+        if self is None:
+            return None
+        self._label_text = label_text
+        self._util = util
+        self._reset_epoch = reset_epoch
+        self._estimated = estimated
+        return self
+
+    def isFlipped(self):
+        # Top-left origin, y grows downward — lets every rect below be
+        # positioned by its distance from the row's top edge, the way the
+        # layout constants above are written.
+        return True
+
+    def _center_y(self, total_h, item_h):
+        return (total_h - item_h) / 2.0
+
+    def drawRect_(self, rect):
+        # Text is measured/drawn via NSAttributedString (._seg_font(), .size(),
+        # .drawAtPoint_()) rather than the NSString sizeWithAttributes_/
+        # drawAtPoint_withAttributes_ category methods — those categories
+        # don't reliably bridge onto plain python str in this environment
+        # (crashes past the Python layer with no catchable exception), while
+        # NSAttributedString is already this file's established idiom for
+        # every other piece of drawn text (_seg/_seg_font, used since v1).
+        bounds = self.bounds()
+        w, h = bounds.size.width, bounds.size.height
+        u = max(0.0, min(1.0, f(self._util) or 0.0))
+        hc = health_color(self._util)
+
+        # -- label (left column) --------------------------------------
+        label_font = NSFont.monospacedSystemFontOfSize_weight_(12, W_SEMI)
+        label_str = _seg_font(self._label_text, NSColor.labelColor(), label_font)
+        label_size = label_str.size()
+        label_str.drawAtPoint_(NSMakePoint(2, self._center_y(h, label_size.height)))
+
+        # -- track (rounded rect, quaternaryLabelColor so it adapts to
+        #    light/dark) --------------------------------------------------
+        track_w = max(0.0, w - BAR_TRACK_RIGHT_MARGIN - BAR_TRACK_X)
+        track_rect = NSMakeRect(BAR_TRACK_X, self._center_y(h, BAR_TRACK_H),
+                                track_w, BAR_TRACK_H)
+        track_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            track_rect, BAR_TRACK_RADIUS, BAR_TRACK_RADIUS)
+        NSColor.quaternaryLabelColor().set()
+        track_path.fill()
+
+        # -- health-color fill, clipped to the track's rounded shape so its
+        #    edges stay rounded (matches the mockup's overflow:hidden trick)
+        fill_w = round(track_w * u)
+        if fill_w > 0:
+            fill_rect = NSMakeRect(BAR_TRACK_X, track_rect.origin.y,
+                                   fill_w, BAR_TRACK_H)
+            ctx = NSGraphicsContext.currentContext()
+            ctx.saveGraphicsState()
+            track_path.addClip()
+            hc.set()
+            NSRectFill(fill_rect)
+            ctx.restoreGraphicsState()
+
+        # -- percent, OUTSIDE the track, right-aligned, health color -------
+        pct_text = (f"est. {pct(self._util)}" if self._estimated
+                    else pct(self._util))
+        pct_region_right = w - BAR_RIGHT_PAD
+        pct_region_left = w - BAR_TRACK_RIGHT_MARGIN + BAR_PCT_GAP
+        pct_avail = max(0.0, pct_region_right - pct_region_left)
+        pct_font = NSFont.monospacedDigitSystemFontOfSize_weight_(12, W_SEMI)
+        pct_str = _seg_font(pct_text, hc, pct_font)
+        pct_size = pct_str.size()
+        if pct_size.width > pct_avail:
+            # "est. NN%" can be wider than the reserved column at 12pt —
+            # shrink once to 11pt rather than let it collide with the track.
+            pct_font = NSFont.monospacedDigitSystemFontOfSize_weight_(11, W_SEMI)
+            pct_str = _seg_font(pct_text, hc, pct_font)
+            pct_size = pct_str.size()
+        pct_str.drawAtPoint_(
+            NSMakePoint(pct_region_right - pct_size.width,
+                       self._center_y(h, pct_size.height)))
+
+        # -- countdown, ADAPTIVE placement (spec §5b) -----------------------
+        if not self._reset_epoch:
+            return
+        cd_text = countdown(self._reset_epoch)
+        infill_font = NSFont.systemFontOfSize_weight_(11, W_SEMI)
+        infill_str = _seg_font(cd_text, BAR_INFILL_TEXT_COLOR, infill_font)
+        cd_size = infill_str.size()
+        if fill_w > 0 and fill_w >= cd_size.width + BAR_INFILL_PADDING:
+            # Fits inside the fill: dark semibold text, right-aligned at the
+            # fill's own right edge (battery-style).
+            x = BAR_TRACK_X + fill_w - BAR_INFILL_INSET - cd_size.width
+            infill_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
+        else:
+            # Falls back to the empty region, right-aligned, secondary color.
+            outside_font = NSFont.systemFontOfSize_(11)
+            outside_str = _seg_font(cd_text, NSColor.secondaryLabelColor(),
+                                    outside_font)
+            cd_size = outside_str.size()
+            empty_left = BAR_TRACK_X + fill_w
+            empty_right = BAR_TRACK_X + track_w
+            x = max(empty_left, empty_right - BAR_INFILL_INSET - cd_size.width)
+            outside_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
 
 
 def info_row(text):
@@ -538,6 +663,15 @@ class CCCBar(rumps.App):
         item._menuitem.setAttributedTitle_(attr_string)
         return item
 
+    def _bar_item(self, key, label, util, reset_epoch, estimated):
+        # No callback: a custom-view NSMenuItem doesn't need the highlight
+        # machinery a callback brings — the row isn't interactive.
+        item = rumps.MenuItem(key)
+        view = BarRowView.alloc().initWithLabel_util_resetEpoch_estimated_(
+            label, util, reset_epoch, estimated)
+        item._menuitem.setView_(view)
+        return item
+
     def _menu_tail(self):
         settings = rumps.MenuItem("Settings")
         show_c = rumps.MenuItem("Show Claude",
@@ -687,21 +821,18 @@ class CCCBar(rumps.App):
         state = rec["state"]
         if state == "ok":
             label5, label7 = labels
+            estimated = bool(rec.get("estimated"))
+            # The reset countdown now lives INSIDE the drawn bar (adaptive
+            # rule, spec §5b) — the separate "resets …" info row is gone.
             if label5 is not None:
-                rows.append(self._attr_item(
-                    name + "_5h", bar_row(rec.get("u5"), f"  {label5}", "", True)))
+                rows.append(self._bar_item(
+                    name + "_5h", label5, rec.get("u5"), rec.get("r5") or None,
+                    estimated))
             if label7 is not None:
-                rows.append(self._attr_item(
-                    name + "_7d", bar_row(rec.get("u7"), f"  {label7}", "", True)))
-            resets = []
-            if label5 is not None and rec.get("r5"):
-                resets.append(f"{label5} resets in {countdown(rec['r5'])}")
-            if label7 is not None and rec.get("r7"):
-                resets.append(f"{label7} resets in {countdown(rec['r7'])}")
-            if resets:
-                rows.append(self._attr_item(name + "_rst",
-                                            info_row("  " + " · ".join(resets))))
-            if rec.get("estimated"):
+                rows.append(self._bar_item(
+                    name + "_7d", label7, rec.get("u7"), rec.get("r7") or None,
+                    estimated))
+            if estimated:
                 rows.append(self._attr_item(
                     name + "_est", info_row("  estimated from local session logs")))
         else:

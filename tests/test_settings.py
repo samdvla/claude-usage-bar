@@ -33,3 +33,11 @@ def test_gemini_cap_roundtrip():
         assert m.gemini_cap() == cap
     # leave the real setting at its default so we don't change app behavior
     m.set_gemini_cap(1000)
+
+def test_providers_arity():
+    m = _load()
+    for row in m.PROVIDERS:
+        assert len(row) == 7
+        key, setting_key, glyph_path, fetcher, fallback, labels, detect = row
+        assert callable(fetcher)
+        assert callable(detect)
