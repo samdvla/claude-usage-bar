@@ -136,15 +136,12 @@ Dropdown/flyout bars become drawn bars with the reset countdown INSIDE the
 track, adaptive battery-style; the separate per-section "resets …" line is
 removed (one line saved per provider).
 
-- **Swap (Sam 2026-07-07): the PERCENTAGE lives inside the bar; the
-  COUNTDOWN takes the outside-right column** (health-colored semibold,
-  monospacedDigit — the row's key figure slot). Adaptive placement rule now
-  applies to the % text: inside the fill (dark `#1A1A1E` ~72 %, semibold)
-  when fill ≥ 50 % and it fits + padding; otherwise right-aligned in the
-  dotted region (secondary label). Estimated values render compactly
-  INSIDE as `~NN%` (unclamped, e.g. `~120%` — the `est.` long form never
-  fits reliably in-bar; the section footnote carries the "estimated"
-  disclosure). Countdown text: existing `countdown()` formatting.
+- **Adaptive placement rule:** if the filled region is wide enough to hold
+  the countdown text + 14 px padding, draw it INSIDE the fill, right-aligned
+  at the fill's edge, dark text (`#1A1A1E` at ~72 % opacity, semibold);
+  otherwise draw it right-aligned in the EMPTY region, secondary-label
+  color. Countdown text: existing `countdown()` formatting (`2h 41m`,
+  `5d 8h`, `52m` when under an hour).
 - **macOS (visual style revised 2026-07-06 per Sam's live feedback):**
   dropdown rows are custom NSViews via `NSMenuItem.setView_`, but the bar
   reproduces the ORIGINAL dotted text-bar aesthetic, not smooth rounded
