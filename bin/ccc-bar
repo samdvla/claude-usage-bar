@@ -64,11 +64,10 @@ BAR_ROW_H = 28    # 26 + 2pt air between bars (layout-polish round)
 # a naive ~30pt guess clipped it into "montl". 2pt label inset + ~37pt text +
 # ~5pt breathing room before the track.
 BAR_TRACK_X = 44
-# Outside-right column (the countdown after the 2026-07-07 swap): must fit
-# "23h 59m"-class strings (~53pt at 12pt monospacedDigit semibold; a shrink
-# tier drops to 11pt if a value ever crowds it) — 72 minus BAR_PCT_GAP and
-# BAR_RIGHT_PAD leaves a 58pt text region.
-BAR_TRACK_RIGHT_MARGIN = 72  # track ends at (width - this); rest = countdown column
+# % column: must fit the widest possible value, "est. 100%" (or "est. 120%"
+# for an over-cap Gemini estimate), ~56.6pt at 11pt monospacedDigit semibold —
+# 72 minus BAR_PCT_GAP and BAR_RIGHT_PAD leaves a 58pt text region.
+BAR_TRACK_RIGHT_MARGIN = 72  # track ends at (width - this); rest is the % column
 BAR_TRACK_H = 17
 BAR_TRACK_RADIUS = 3.0    # near-rectangular with slight rounding (revised §5b)
 BAR_PCT_GAP = 4           # gap between track's right edge and the % text region
@@ -492,61 +491,54 @@ class BarRowView(NSView):
             NSRectFill(fill_rect)
             ctx.restoreGraphicsState()
 
-        # -- countdown, OUTSIDE the track, right-aligned (swap, Sam
-        #    2026-07-07: the outside column is the row's key-figure slot and
-        #    now carries the reset countdown). Health color, semibold,
-        #    monospacedDigit 12pt — same region arithmetic and shrink tier
-        #    the % used. No reset epoch → countdown() renders "—", dimmed to
-        #    secondary instead of health-colored. -------------------------
-        cd_text = countdown(self._reset_epoch)
-        cd_color = NSColor.secondaryLabelColor() if cd_text == "—" else hc
-        out_region_right = w - BAR_RIGHT_PAD
-        out_region_left = w - BAR_TRACK_RIGHT_MARGIN + BAR_PCT_GAP
-        out_avail = max(0.0, out_region_right - out_region_left)
-        out_font = NSFont.monospacedDigitSystemFontOfSize_weight_(12, W_SEMI)
-        out_str = _seg_font(cd_text, cd_color, out_font)
-        out_size = out_str.size()
-        if out_size.width > out_avail:
-            # "23h 59m"-class strings can crowd the column at 12pt — shrink
-            # once to 11pt rather than let them collide with the track.
-            out_font = NSFont.monospacedDigitSystemFontOfSize_weight_(11, W_SEMI)
-            out_str = _seg_font(cd_text, cd_color, out_font)
-            out_size = out_str.size()
-        out_str.drawAtPoint_(
-            NSMakePoint(out_region_right - out_size.width,
-                       self._center_y(h, out_size.height)))
-
-        # -- percentage, INSIDE the bar (adaptive rule, mechanics unchanged:
-        #    fill >= 50% and text fits + padding → dark in-fill text at the
-        #    fill's right edge; else right-aligned in the dotted region,
-        #    secondary color). Estimated records render compactly as ~NN%
-        #    from the unclamped real fraction (e.g. ~120%) — the section
-        #    footnote carries the "estimated" disclosure. ------------------
+        # -- percent, OUTSIDE the track, right-aligned, health color -------
         if self._estimated:
+            # Real (unclamped) estimate when available — an over-cap Gemini
+            # day reads "est. 120%" while the fill itself stays capped.
             rp = f(self._real_pct)
-            pct_text = (f"~{round(rp * 100)}%" if rp is not None
-                        else f"~{pct(self._util)}")
+            pct_text = (f"est. {round(rp * 100)}%" if rp is not None
+                        else f"est. {pct(self._util)}")
         else:
             pct_text = pct(self._util)
+        pct_region_right = w - BAR_RIGHT_PAD
+        pct_region_left = w - BAR_TRACK_RIGHT_MARGIN + BAR_PCT_GAP
+        pct_avail = max(0.0, pct_region_right - pct_region_left)
+        pct_font = NSFont.monospacedDigitSystemFontOfSize_weight_(12, W_SEMI)
+        pct_str = _seg_font(pct_text, hc, pct_font)
+        pct_size = pct_str.size()
+        if pct_size.width > pct_avail:
+            # "est. NN%" can be wider than the reserved column at 12pt —
+            # shrink once to 11pt rather than let it collide with the track.
+            pct_font = NSFont.monospacedDigitSystemFontOfSize_weight_(11, W_SEMI)
+            pct_str = _seg_font(pct_text, hc, pct_font)
+            pct_size = pct_str.size()
+        pct_str.drawAtPoint_(
+            NSMakePoint(pct_region_right - pct_size.width,
+                       self._center_y(h, pct_size.height)))
+
+        # -- countdown, ADAPTIVE placement (spec §5b) -----------------------
+        if not self._reset_epoch:
+            return
+        cd_text = countdown(self._reset_epoch)
         infill_font = NSFont.systemFontOfSize_weight_(11, W_SEMI)
-        infill_str = _seg_font(pct_text, BAR_INFILL_TEXT_COLOR, infill_font)
-        p_size = infill_str.size()
+        infill_str = _seg_font(cd_text, BAR_INFILL_TEXT_COLOR, infill_font)
+        cd_size = infill_str.size()
         if (u >= MIN_INFILL_FRACTION
-                and fill_w >= p_size.width + BAR_INFILL_PADDING):
+                and fill_w >= cd_size.width + BAR_INFILL_PADDING):
             # Fits inside the fill: dark semibold text, right-aligned at the
             # fill's own right edge (battery-style).
-            x = track_x + fill_w - BAR_INFILL_INSET - p_size.width
-            infill_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, p_size.height)))
+            x = track_x + fill_w - BAR_INFILL_INSET - cd_size.width
+            infill_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
         else:
-            # Falls back to the dotted region, right-aligned, secondary color.
+            # Falls back to the empty region, right-aligned, secondary color.
             outside_font = NSFont.systemFontOfSize_(11)
-            outside_str = _seg_font(pct_text, NSColor.secondaryLabelColor(),
+            outside_str = _seg_font(cd_text, NSColor.secondaryLabelColor(),
                                     outside_font)
-            p_size = outside_str.size()
+            cd_size = outside_str.size()
             empty_left = track_x + fill_w
             empty_right = track_x + track_w
-            x = max(empty_left, empty_right - BAR_INFILL_INSET - p_size.width)
-            outside_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, p_size.height)))
+            x = max(empty_left, empty_right - BAR_INFILL_INSET - cd_size.width)
+            outside_str.drawAtPoint_(NSMakePoint(x, self._center_y(h, cd_size.height)))
 
 
 def info_row(text):
