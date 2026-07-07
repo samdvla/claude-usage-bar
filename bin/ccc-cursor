@@ -46,6 +46,22 @@ TIMEOUT = 20
 MIN_INTERVAL = 300
 
 
+def _num(v):
+    """Coerce a JSON number to float, or None. Connect-RPC (protobuf JSON)
+    encodes int64 fields like billingCycleEnd as *strings* — observed live
+    2026-07-06 — so numeric strings must be accepted too."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        try:
+            return float(v)
+        except ValueError:
+            return None
+    return None
+
+
 def _token(state_db):
     """Read-only, immutable read of the cursorAuth/accessToken value, or None."""
     try:
@@ -145,7 +161,13 @@ def cursor_usage(state_db=None, cache_path=None, now=None, urlopen=None, min_int
             return rec
         return {"state": "error"}
 
-    if not usage.get("enabled", False):
+    # no_data ONLY when the account is explicitly disabled (`enabled` key
+    # present and false) OR planUsage is absent/not-a-dict. A missing
+    # `enabled` key with a present planUsage is a healthy account — verified
+    # live 2026-07-06: real free-tier responses omit `enabled` entirely while
+    # carrying valid planUsage/billing fields.
+    plan_usage = usage.get("planUsage")
+    if usage.get("enabled") is False or not isinstance(plan_usage, dict):
         return {"state": "no_data"}
 
     plan_name = None
@@ -157,16 +179,15 @@ def cursor_usage(state_db=None, cache_path=None, now=None, urlopen=None, min_int
     except Exception:
         plan_name = None
 
-    plan_usage = usage.get("planUsage") or {}
-    percent = plan_usage.get("totalPercentUsed")
+    percent = _num(plan_usage.get("totalPercentUsed"))
     if percent is None:
-        limit = plan_usage.get("limit")
-        spend = plan_usage.get("totalSpend")
+        limit = _num(plan_usage.get("limit"))
+        spend = _num(plan_usage.get("totalSpend"))
         if limit:
             percent = (spend or 0) / limit * 100.0
 
     u5 = None if percent is None else round(percent / 100.0, 4)
-    cycle_end = usage.get("billingCycleEnd")
+    cycle_end = _num(usage.get("billingCycleEnd"))
     r5 = None if cycle_end is None else int(cycle_end / 1000)
 
     rec = {

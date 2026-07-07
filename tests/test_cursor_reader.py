@@ -120,6 +120,44 @@ def test_disabled_subscription(tmp_path):
     assert rec == {"state": "no_data"}
 
 
+def test_missing_enabled_key_is_active(tmp_path):
+    """Real 2026-07 free-tier shape: no `enabled` key at all, valid planUsage.
+
+    billingCycle* are strings here on purpose — Connect-RPC (protobuf JSON)
+    encodes int64 fields as strings, observed on the live API.
+    """
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache = str(tmp_path / "cache.json")
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": {
+            "planUsage": {"totalPercentUsed": 0, "apiPercentUsed": 0,
+                          "autoPercentUsed": 0, "remainingBonus": 0},
+            "billingCycleStart": "1781509572704",
+            "billingCycleEnd": "1784101572704",
+            "displayThreshold": 200,
+        },
+        "GetPlanInfo": {"planInfo": {"planName": "Free"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=cache, now=NOW, urlopen=urlopen)
+    assert rec["state"] == "ok"
+    assert rec["u5"] == 0.0
+    assert rec["r5"] == 1784101572
+    assert rec["plan"] == "Free"
+
+
+def test_missing_plan_usage_no_data(tmp_path):
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache = str(tmp_path / "cache.json")
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": {"billingCycleEnd": 1784101572704},
+        "GetPlanInfo": {"planInfo": {"planName": "Free"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=cache, now=NOW, urlopen=urlopen)
+    assert rec == {"state": "no_data"}
+
+
 def test_401_expired(tmp_path):
     m = _load()
     db = _mkdb(tmp_path)
