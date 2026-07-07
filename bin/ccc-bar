@@ -49,7 +49,7 @@ SEGMENT_GAP = "   "  # uniform gap between provider segments in the title
 # Drawn dropdown bar row (mockup variation C, spec 2026-07-06 §5b). All values
 # are the row's own view-local coordinates; the view is flipped (see
 # BarRowView.isFlipped) so y grows downward from the row's top edge.
-BAR_ROW_W = 300
+BAR_ROW_W = 250   # narrowed from 300 (Sam 2026-07-06): compactness is the point
 BAR_ROW_H = 26
 # Track start: the label column's widest possible value is "month" (the
 # longest of the fixed label set 5h/7d/month/day), which measures ~37pt at
@@ -62,7 +62,7 @@ BAR_TRACK_X = 44
 # 68 minus BAR_PCT_GAP and BAR_RIGHT_PAD leaves a 58pt text region.
 BAR_TRACK_RIGHT_MARGIN = 68  # track ends at (width - this); rest is the % column
 BAR_TRACK_H = 17
-BAR_TRACK_RADIUS = 5.0
+BAR_TRACK_RADIUS = 3.0    # near-rectangular with slight rounding (revised §5b)
 BAR_PCT_GAP = 4           # gap between track's right edge and the % text region
 BAR_RIGHT_PAD = 6         # inset from the view's right edge to the % text
 BAR_INFILL_INSET = 7      # inset from an edge (fill or track) for countdown text
@@ -73,9 +73,18 @@ BAR_INFILL_PADDING = 14   # adaptive rule: fill must be >= text width + this
 # genuinely high fills (79%+) go battery-style, even though shorter countdown
 # strings would technically fit inside smaller fills.
 MIN_INFILL_FRACTION = 0.5
-# Fill darkening (mockup: color-mix(health 82%, black)): blend the health
-# color 18% toward black so the dark in-fill countdown text keeps contrast.
-BAR_FILL_DARKEN = 0.18
+# Dotted text-bar texture (revised §5b — Sam's original ░/█ aesthetic):
+# the empty region carries a dot grid like the old ░ shading; the fill is the
+# plain vivid health color with faint vertical separators like adjacent █
+# glyph boundaries.
+BAR_DOT_D = 1.5           # dot diameter (~the old ░ speckle size)
+BAR_DOT_PITCH = 4.5       # dot grid pitch, both axes
+BAR_SEG_PITCH = 8         # separator line spacing inside the fill
+BAR_SEG_W = 1.0           # separator line width
+BAR_SEG_DARKEN = 0.25     # separator = health color blended toward black
+# Track background: near-black over the dark menu material (Sam's original
+# track read ~#2b2b2d there); over a light menu it degrades to a medium gray.
+BAR_TRACK_ALPHA = 0.25
 # Dark, semibold countdown text drawn INSIDE a colored fill (battery-style).
 BAR_INFILL_TEXT_COLOR = NSColor.colorWithCalibratedRed_green_blue_alpha_(
     0x1A / 255.0, 0x1A / 255.0, 0x1E / 255.0, 0.72)
@@ -424,32 +433,58 @@ class BarRowView(NSView):
         label_size = label_str.size()
         label_str.drawAtPoint_(NSMakePoint(2, self._center_y(h, label_size.height)))
 
-        # -- track (rounded rect, quaternaryLabelColor so it adapts to
-        #    light/dark) --------------------------------------------------
+        # -- track: near-black, near-rectangular (3pt radius) rect — the
+        #    backdrop the ░-style dot grid sits on (revised §5b) -----------
         track_w = max(0.0, w - BAR_TRACK_RIGHT_MARGIN - BAR_TRACK_X)
-        track_rect = NSMakeRect(BAR_TRACK_X, self._center_y(h, BAR_TRACK_H),
-                                track_w, BAR_TRACK_H)
+        track_y = self._center_y(h, BAR_TRACK_H)
+        track_rect = NSMakeRect(BAR_TRACK_X, track_y, track_w, BAR_TRACK_H)
         track_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
             track_rect, BAR_TRACK_RADIUS, BAR_TRACK_RADIUS)
-        NSColor.quaternaryLabelColor().set()
+        NSColor.blackColor().colorWithAlphaComponent_(BAR_TRACK_ALPHA).set()
         track_path.fill()
 
-        # -- health-color fill, clipped to the track's rounded shape so its
-        #    edges stay rounded (matches the mockup's overflow:hidden trick).
-        #    The fill is the health color darkened 18% toward black (mockup's
-        #    color-mix(health 82%, black)) for in-fill text contrast; the %
-        #    text outside keeps the plain health color, also per the mockup.
         fill_w = round(track_w * u)
+        fill_right = BAR_TRACK_X + fill_w
+        ctx = NSGraphicsContext.currentContext()
+
+        # -- dot grid in the EMPTY region only (the old ░ shading):
+        #    ~1.5pt dots on a regular ~4.5pt pitch, dim dynamic color,
+        #    clipped to the track's rounded path ---------------------------
+        ctx.saveGraphicsState()
+        track_path.addClip()
+        NSColor.tertiaryLabelColor().set()
+        n_rows = int((BAR_TRACK_H - BAR_DOT_D) // BAR_DOT_PITCH) + 1
+        grid_h = (n_rows - 1) * BAR_DOT_PITCH + BAR_DOT_D
+        dot_y0 = track_y + (BAR_TRACK_H - grid_h) / 2.0
+        x = BAR_TRACK_X + BAR_DOT_PITCH / 2.0
+        x_end = BAR_TRACK_X + track_w - BAR_DOT_D
+        while x <= x_end:
+            if x >= fill_right + 1.0:  # dots never under the fill
+                for r in range(n_rows):
+                    NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+                        x, dot_y0 + r * BAR_DOT_PITCH,
+                        BAR_DOT_D, BAR_DOT_D)).fill()
+            x += BAR_DOT_PITCH
+        ctx.restoreGraphicsState()
+
+        # -- fill: plain vivid health color (the old █ run) with faint
+        #    vertical separators every BAR_SEG_PITCH like adjacent █ glyph
+        #    boundaries. Left corners follow the track radius via the clip;
+        #    the right edge stays straight -------------------------------
         if fill_w > 0:
-            fill_color = hc.blendedColorWithFraction_ofColor_(
-                BAR_FILL_DARKEN, NSColor.blackColor()) or hc
-            fill_rect = NSMakeRect(BAR_TRACK_X, track_rect.origin.y,
-                                   fill_w, BAR_TRACK_H)
-            ctx = NSGraphicsContext.currentContext()
+            fill_rect = NSMakeRect(BAR_TRACK_X, track_y, fill_w, BAR_TRACK_H)
             ctx.saveGraphicsState()
             track_path.addClip()
-            fill_color.set()
+            hc.set()
             NSRectFill(fill_rect)
+            sep_color = hc.blendedColorWithFraction_ofColor_(
+                BAR_SEG_DARKEN, NSColor.blackColor()) or hc
+            sep_color.set()
+            sx = BAR_SEG_PITCH  # skip x=0 — no separator on the fill's left edge
+            while sx + BAR_SEG_W <= fill_w:
+                NSRectFill(NSMakeRect(BAR_TRACK_X + sx, track_y,
+                                      BAR_SEG_W, BAR_TRACK_H))
+                sx += BAR_SEG_PITCH
             ctx.restoreGraphicsState()
 
         # -- percent, OUTSIDE the track, right-aligned, health color -------
