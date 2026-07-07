@@ -70,7 +70,7 @@ BAR_TRACK_X = 44
 BAR_TRACK_RIGHT_MARGIN = 72  # track ends at (width - this); rest is the % column
 BAR_TRACK_H = 17
 BAR_TRACK_RADIUS = 3.0    # near-rectangular with slight rounding (revised §5b)
-BAR_PCT_GAP = 4           # gap between track's right edge and the % text region
+BAR_PCT_GAP = 10          # gap between track's right edge and the % text region
 BAR_RIGHT_PAD = 10        # inset from the view's right edge to the % text
 BAR_INFILL_INSET = 10     # inset from an edge (fill or track) for countdown text
 BAR_INFILL_PADDING = 20   # adaptive rule: fill must be >= text width + this
@@ -264,7 +264,22 @@ def fetch():
     # overload) may not — only treat it as data when the usage is actually there.
     if R5_KEY not in headers and R7_KEY not in headers:
         return {"error": True}
-    return {"rate_headers": headers, "plan": creds.get("subscriptionType")}
+    return {"rate_headers": headers, "plan": creds.get("subscriptionType"),
+            "tier": creds.get("rateLimitTier")}
+
+
+def _claude_plan_label(tier, sub):
+    """Human plan label from Claude Code's keychain fields.
+
+    rateLimitTier carries the real tier (e.g. "default_claude_max_20x" →
+    "Max 20x"); subscriptionType ("max") is the fallback when the tier field
+    is absent or unrecognized.
+    """
+    if isinstance(tier, str) and tier.startswith("default_claude_"):
+        parts = [p for p in tier[len("default_claude_"):].split("_") if p]
+        if parts:
+            return " ".join(p if p[:1].isdigit() else p.title() for p in parts)
+    return (sub or "").title() or None
 
 
 def claude_usage():
@@ -284,7 +299,8 @@ def claude_usage():
 
     return {"state": "ok", "u5": f(rh.get(R5_KEY)), "u7": f(rh.get(R7_KEY)),
             "r5": _i(rh.get(RESET5_KEY)), "r7": _i(rh.get(RESET7_KEY)),
-            "plan": (data.get("plan") or "").title() or None, "as_of": None}
+            "plan": _claude_plan_label(data.get("tier"), data.get("plan")),
+            "as_of": None}
 
 
 def codex_usage():

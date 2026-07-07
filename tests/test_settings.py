@@ -52,3 +52,17 @@ def test_title_value_real_estimated_pct():
                            "u5": 0.12}) == "est. 12%"
     # non-estimated records ignore pct entirely
     assert m._title_value({"state": "ok", "u5": 0.79}) == "79%"
+
+
+def test_claude_plan_label_from_tier():
+    m = _load()
+    assert m._claude_plan_label("default_claude_max_20x", "max") == "Max 20x"
+    assert m._claude_plan_label("default_claude_max_5x", "max") == "Max 5x"
+    assert m._claude_plan_label("default_claude_pro", "pro") == "Pro"
+
+
+def test_claude_plan_label_fallbacks():
+    m = _load()
+    assert m._claude_plan_label(None, "max") == "Max"
+    assert m._claude_plan_label("something_weird", "max") == "Max"
+    assert m._claude_plan_label(None, None) is None
