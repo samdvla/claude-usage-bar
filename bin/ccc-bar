@@ -513,7 +513,7 @@ class BarRowView(NSView):
             pct_str = _seg_font(pct_text, hc, pct_font)
             pct_size = pct_str.size()
         pct_str.drawAtPoint_(
-            NSMakePoint(pct_region_right - pct_size.width,
+            NSMakePoint(pct_region_left,  # left-anchored: % hugs the track
                        self._center_y(h, pct_size.height)))
 
         # -- countdown, ADAPTIVE placement (spec §5b) -----------------------
