@@ -19,6 +19,17 @@ Slug note: simple-icons ships two separate Anthropic-family entries — "anthrop
 mark used for the Claude product, which is what this glyph is for). We use
 "claude", not "anthropic".
 
+Cursor/Gemini slug note: verified against simple-icons' data.json on 2026-07-06.
+"Cursor" -> slug "cursor" (its only Cursor-family entry, the angular pointer/cube
+mark). "Google Gemini" -> slug "googlegemini" (there is no separate bare "gemini"
+icon in simple-icons — that name is not in use for another product there — so
+this is the only Gemini candidate; it's the four-point-star/sparkle mark).
+Checked whether the REF below (pinned pre-existing, see above) predates these
+two icons, since the brief flagged that risk: both icons/cursor.svg and
+icons/googlegemini.svg already exist at REF and are byte-identical to
+`develop` as of 2026-07-06, so no second/newer ref was needed — all four
+glyphs share the one pinned REF.
+
 Usage: python3 generate_glyphs.py        (needs: pip install cairosvg)
 """
 import os
@@ -27,7 +38,12 @@ import urllib.request
 import cairosvg
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ICONS = {"claude-glyph.png": "claude", "codex-glyph.png": "openai"}
+ICONS = {
+    "claude-glyph.png": "claude",
+    "codex-glyph.png": "openai",
+    "cursor-glyph.png": "cursor",
+    "gemini-glyph.png": "googlegemini",
+}
 REF = "cf471df7755a247c90fc615cdeb4b14daf678e6b"
 URL = "https://raw.githubusercontent.com/simple-icons/simple-icons/" + REF + "/icons/{}.svg"
 

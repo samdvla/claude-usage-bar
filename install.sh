@@ -33,6 +33,8 @@ install -m 0755 "$REPO/bin/ccc-gemini" "$BIN/ccc-gemini"
 cp "$REPO/assets/icon.png" "$CFGDIR/icon.png"
 cp "$REPO/assets/claude-glyph.png" "$CFGDIR/claude-glyph.png"
 cp "$REPO/assets/codex-glyph.png" "$CFGDIR/codex-glyph.png"
+cp "$REPO/assets/cursor-glyph.png" "$CFGDIR/cursor-glyph.png"
+cp "$REPO/assets/gemini-glyph.png" "$CFGDIR/gemini-glyph.png"
 
 # 4. Build the .app bundle in a writable Applications folder (tap to open)
 if [ -w /Applications ]; then APPDIR="/Applications"; else APPDIR="$HOME/Applications"; fi
