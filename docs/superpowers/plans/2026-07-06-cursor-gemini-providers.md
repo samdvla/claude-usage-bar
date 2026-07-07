@@ -20,7 +20,7 @@
 - Detection: claude = `security find-generic-password -s "Claude Code-credentials"` rc 0; codex = isdir `~/.codex/sessions`; cursor = state.vscdb exists AND `cursorAuth/accessToken` key present (macOS `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb`, Windows `%APPDATA%\Cursor\User\globalStorage\state.vscdb`); gemini = isdir `~/.gemini/tmp`. Shown iff detected AND enabled. Cache detection per refresh tick.
 - macOS single item: `SEGMENT_GAP = "   "` (3 spaces) between segments; estimated values render `est. NN%`; all-hidden → terminal icon anchor. Settings adds `showCursor`/`showGemini` (default ON) + "Gemini plan" submenu writing `geminiDailyCap` int: Free 1000 (default) / Pro 1500 / Ultra 2000 / API key 250.
 - Windows: registry `ShowCursor`/`ShowCodex` etc. DWORDs default 1 + `GeminiDailyCap` DWORD default 1000; badges Cursor `#1A1A1E`/white text, Gemini `#4285F4`/white text; estimated tray values prefixed `~`.
-- Windows PC: `ssh cyberadmin@100.116.225.124` (PowerShell 5.1 — `;` not `&&`; dotnet at `C:\Program Files\dotnet\dotnet.exe`; repo cloned at `C:\Users\cyberadmin\claude-usage-bar`).
+- Windows PC: ssh to the Windows build box (PowerShell 5.1 — `;` not `&&`; dotnet at `C:\Program Files\dotnet\dotnet.exe`; repo cloned under the build user's home).
 - macOS tests: `~/.config/ccc/venv/bin/python -m pytest tests/ -v` (currently 11). Test loading via `tests/test_selfheal.py`'s shared `_load()` pattern for ccc-bar; new helpers get their own SourceFileLoader (stdlib-only, no PyObjC conflict).
 
 ## File Map

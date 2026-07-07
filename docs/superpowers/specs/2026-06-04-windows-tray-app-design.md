@@ -82,7 +82,7 @@ Windows has no equivalent. Resolution order:
 Returns `null` when no usable token is found → "no login" UI state.
 
 > **Verify in planning:** confirm the exact path and JSON shape on a real Windows
-> Claude Code install (candidate: `gamingpc`, `cyberadmin@100.116.225.124`) before
+> Claude Code install (any Windows box) before
 > locking the reader. This is the one piece that can't be confirmed from the Mac.
 
 ## Component 2 — Probe (logic ported verbatim from Python)

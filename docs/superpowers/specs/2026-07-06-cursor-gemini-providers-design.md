@@ -205,7 +205,7 @@ copies all four glyphs.
   a free plan proves the pipeline). Gemini stays fixture-verified —
   README labels it community-verifiable; flagged, not blocking.
 - Windows compile/test/build on the gaming PC (SDK now installed, repo
-  cloned under cyberadmin from the previous round).
+  cloned from the previous round).
 
 ## 10. Rollout
 

@@ -13,7 +13,7 @@
 ## Build/Test environment note
 
 - `ClaudeUsage.Core` and `Core.Tests` target `net8.0` → they **build and `dotnet test` on macOS/Linux/Windows**. Do all Core TDD on whatever machine you're on.
-- `ClaudeUsageBar` (tray) and `Cli` target `net8.0-windows` and use `System.Drawing`/WinForms → they **only build/run on Windows**. The visual tasks (icon render, flyout) and the manual smoke test require a Windows box (`gamingpc`, `cyberadmin@100.116.225.124`, or any Windows machine with Claude Code logged in).
+- `ClaudeUsageBar` (tray) and `Cli` target `net8.0-windows` and use `System.Drawing`/WinForms → they **only build/run on Windows**. The visual tasks (icon render, flyout) and the manual smoke test require a Windows box (any Windows machine with Claude Code logged in).
 
 Install the .NET 8 SDK first (`dotnet --version` should report 8.x). On Windows: `winget install Microsoft.DotNet.SDK.8`. On macOS: `brew install dotnet@8` or the official installer.
 
@@ -794,7 +794,7 @@ default path is confirmed (not guessed). No code unless the path differs.
 
 - [ ] **Step 1: Inspect a real Windows Claude Code login**
 
-On a Windows box with Claude Code logged in (e.g. `ssh cyberadmin@100.116.225.124`), run in PowerShell:
+On a Windows box with Claude Code logged in (e.g. over ssh), run in PowerShell:
 
 ```powershell
 Test-Path "$env:USERPROFILE\.claude\.credentials.json"
