@@ -213,3 +213,24 @@ Branch `feat/cursor-gemini-providers` off master (v1 merged). macOS first,
 then Windows, then README provider matrix (what's measured, how, exact vs
 estimated). Windows visual tray check remains an open item from v1 —
 verify both rounds together when Sam is at the PC.
+
+## 5c. Settings window (added 2026-07-07, Sam)
+
+A native AppKit settings window ("simple but very well made", modern System
+Settings feel), opened from Settings ▸ "Settings…" — the submenu KEEPS the
+hover quick-toggles above it.
+
+- Sections: PROVIDERS (per-provider Show checkbox, glyph + name, undetected
+  rows dimmed with "(not detected)"; Gemini row hosts the plan popup),
+  MENU BAR (radio: Glyph + percent / Glyph only → `displayMode` default
+  "full"), BARS (three NSColorWells for healthy/warning/critical +
+  threshold popups `warnThreshold` default 0.5 / `critThreshold` default
+  0.8 + Reset to defaults), ADVANCED (Auto-restore icon).
+- Custom colors/thresholds apply everywhere health colors render (bar
+  fills, % text, title values). Stored in the same NSUserDefaults suite
+  (colors as "r,g,b" float strings: `healthGreen`/`healthOrange`/
+  `healthRed`); absent keys = system colors + 0.5/0.8 (exact current
+  behavior).
+- Live sync both directions: window writes defaults + triggers refresh;
+  menu toggles update checkboxes if window open. Single window instance,
+  activates the app, closes clean, light/dark correct.
