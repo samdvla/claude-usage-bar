@@ -27,6 +27,7 @@ install -m 0755 "$REPO/bin/ccc" "$BIN/ccc"
 install -m 0755 "$REPO/bin/ccc-bar" "$BIN/ccc-bar"
 install -m 0755 "$REPO/bin/ccc-codex" "$BIN/ccc-codex"
 install -m 0755 "$REPO/bin/ccc-cursor" "$BIN/ccc-cursor"
+install -m 0755 "$REPO/bin/ccc-gemini" "$BIN/ccc-gemini"
 
 # 3. Menu bar icon (prebuilt; no image libs needed)
 cp "$REPO/assets/icon.png" "$CFGDIR/icon.png"

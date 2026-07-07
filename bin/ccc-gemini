@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""ccc-gemini — estimate daily Gemini CLI usage from its local session logs.
+
+Gemini CLI (unlike Codex) writes no structured rate-limit snapshot to disk —
+the only local artifact is the append-only chat-recording JSONL under
+~/.gemini/tmp/<projectHash>/chats/*.jsonl (subagent sessions nest one level
+deeper: chats/<parentSessionId>/<subagentSessionId>.jsonl). Each line is a
+MessageRecord; a `type: "gemini"` record is emitted once per streamed model
+response (~one quota-counted request). Counting these records with a
+`timestamp` inside "today" (America/Los_Angeles, matching Google's stated
+daily-quota reset rule) is a reasonable local proxy for requests consumed
+today — see .superpowers/sdd/research-gemini.md for the full trace.
+
+This is explicitly an ESTIMATE, not a server-confirmed number (unlike Claude's
+header-derived stats or Codex's server-echoed rate_limits): there is no local
+cap value either, since account tier isn't cached anywhere, so the caller
+supplies `cap` (default 1000, the Free-tier daily limit).
+
+Control records (`{"$rewindTo": ...}`, `{"$set": {...}}`) mark conversation
+rewinds/metadata patches. A rewound call still consumed real quota, so this
+reader deliberately does NOT replay/undo anything for them — it only ever
+counts matching `type: "gemini"` records forward, never subtracts.
+
+Stdlib only — imported by ccc-bar and invoked as `python3 ccc-gemini` by the
+ccc CLI (prints the record as JSON).
+"""
+import glob
+import json
+import os
+import sys
+import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+GEMINI_ROOT = os.path.expanduser("~/.gemini")
+PT = ZoneInfo("America/Los_Angeles")
+STALE_SECONDS = 48 * 3600
+DEFAULT_CAP = 1000
+
+
+def _midnight_pt(now):
+    """Aware datetime for the most recent America/Los_Angeles midnight at or
+    before `now`. zoneinfo recomputes the correct UTC offset for whatever
+    wall-clock date/time it's asked about, so this (and the +1 day below)
+    stay correct across a DST transition without any special-casing."""
+    return datetime.fromtimestamp(now, PT).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+
+def midnight_pt(now):
+    """Epoch of the most recent America/Los_Angeles midnight at or before now."""
+    return int(_midnight_pt(now).timestamp())
+
+
+def next_midnight_pt(now):
+    """Epoch of the following America/Los_Angeles midnight (DST-safe: adding
+    one calendar day to the aware midnight datetime and letting zoneinfo
+    resolve the new wall-clock time's own UTC offset — e.g. on a spring-
+    forward day this is only 23 real hours later, correctly)."""
+    return int((_midnight_pt(now) + timedelta(days=1)).timestamp())
+
+
+def _parse_iso(ts):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError, TypeError):
+        return None
+
+
+def _session_files(root):
+    """All chat-recording JSONL paths: top-level sessions + one-deep subagent
+    sessions, across every project hash directory."""
+    files = glob.glob(os.path.join(root, "tmp", "*", "chats", "*.jsonl"))
+    files += glob.glob(os.path.join(root, "tmp", "*", "chats", "*", "*.jsonl"))
+    return files
+
+
+def _count_file(path, midnight_epoch):
+    """Count of type=='gemini' records in `path` with timestamp >= midnight_epoch.
+    Never raises: unreadable files, malformed JSON, non-dict lines, missing/bad
+    timestamps, and non-'gemini' records (including control records like
+    $rewindTo/$set, which are correctly never subtracted) are all just skipped."""
+    count = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("type") != "gemini":
+                    continue
+                epoch = _parse_iso(rec.get("timestamp"))
+                if epoch is None:
+                    continue
+                if epoch >= midnight_epoch:
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def gemini_detected(root=None):
+    root = GEMINI_ROOT if root is None else root
+    return os.path.isdir(os.path.join(root, "tmp"))
+
+
+def gemini_usage(root=None, cap=1000, now=None):
+    """Normalized, estimated Gemini daily-usage record; see module docstring."""
+    root = GEMINI_ROOT if root is None else root
+    now = int(time.time()) if now is None else now
+
+    if not gemini_detected(root):
+        return {"state": "no_data"}
+
+    if not isinstance(cap, (int, float)) or isinstance(cap, bool) or cap < 1:
+        cap = DEFAULT_CAP
+
+    midnight_epoch = midnight_pt(now)
+    cutoff_mtime = now - STALE_SECONDS
+
+    count = 0
+    for path in _session_files(root):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime < cutoff_mtime:
+            continue
+        count += _count_file(path, midnight_epoch)
+
+    u5 = min(count / cap, 1.0)
+    return {
+        "state": "ok",
+        "u5": round(u5, 4),
+        "u7": None,
+        "r5": next_midnight_pt(now),
+        "r7": None,
+        "plan": None,
+        "as_of": None,
+        "estimated": True,
+        "count": count,
+        "cap": cap,
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cap", type=int, default=DEFAULT_CAP)
+    parser.add_argument("--detect", action="store_true")
+    args = parser.parse_args()
+
+    if args.detect:
+        sys.exit(0 if gemini_detected() else 1)
+
+    print(json.dumps(gemini_usage(cap=args.cap)))
