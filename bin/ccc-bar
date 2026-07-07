@@ -874,7 +874,7 @@ class CCCBar(rumps.App):
         head = name + (f" · {rec['plan']}" if rec.get("plan") else "")
         as_of = rec.get("as_of")
         if as_of and time.time() - as_of > REFRESH_SECONDS:
-            head += f"   · as of {_age(as_of)} ago"
+            head += f"   · {_age(as_of)} ago"
         if rec.get("stale"):
             head += " · cached"
         rows.append(self._attr_item(name + "_hdr", info_row(head)))
