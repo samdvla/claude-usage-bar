@@ -41,6 +41,11 @@ DEFAULT_CAP = 1000
 # segment forever. The newest chat log's mtime is the recency signal.
 ACTIVE_DAYS = 14
 
+# Cap -> tier label (spec §4's Settings ▸ "Gemini plan" picker), so the
+# dropdown header can show "Gemini · Free" etc. instead of a bare percentage.
+# An unrecognized cap (e.g. a stray custom value) falls back to no label.
+PLAN_BY_CAP = {250: "API key", 1000: "Free", 1500: "AI Pro", 2000: "AI Ultra"}
+
 
 def _midnight_pt(now):
     """Aware datetime for the most recent America/Los_Angeles midnight at or
@@ -161,7 +166,7 @@ def gemini_usage(root=None, cap=1000, now=None):
         "u7": None,
         "r5": next_midnight_pt(now),
         "r7": None,
-        "plan": None,
+        "plan": PLAN_BY_CAP.get(cap),
         "as_of": None,
         "estimated": True,
         "count": count,

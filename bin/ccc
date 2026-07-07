@@ -46,7 +46,11 @@ bar() { # $1=fraction  $2=R/Y/G
 countdown() { local t="$1" now d; now=$(date +%s)
   [ -z "$t" ] || [ "$t" = "null" ] && { echo "—"; return; }
   d=$((t-now)); [ "$d" -lt 0 ] && { echo "now"; return; }
-  printf "%dh %02dm" "$((d/3600))" "$(((d%3600)/60))"; }
+  if [ "$d" -ge 86400 ]; then
+    printf "%dd %dh" "$((d/86400))" "$(((d%86400)/3600))"
+  else
+    printf "%dh %02dm" "$((d/3600))" "$(((d%3600)/60))"
+  fi; }
 
 render() {
   local tok hdrs u5 u7 r5
@@ -96,6 +100,7 @@ gemini_cap() { # daily request cap from the menu bar app's setting, else 1000
 
 render_codex() {
   local rec state u5 u7 r5 asof c5 c7 p5 p7 agestr=""
+  python3 "$(codex_helper)" --detect >/dev/null 2>&1 || return 0
   rec=$(python3 "$(codex_helper)" 2>/dev/null) || return 0
   state=$(echo "$rec" | jq -r '.state // empty' 2>/dev/null) || state=""
   if [ "$state" != "ok" ]; then
@@ -200,7 +205,9 @@ if [ "$WATCH" = "1" ] && [ "$JSON" != "1" ]; then
 else
   rc=0; render || rc=$?
   if [ "$JSON" = "1" ]; then
-    python3 "$(codex_helper)" 2>/dev/null || true
+    if python3 "$(codex_helper)" --detect >/dev/null 2>&1; then
+      python3 "$(codex_helper)" 2>/dev/null || true
+    fi
     if python3 "$(cursor_helper)" --detect >/dev/null 2>&1; then
       python3 "$(cursor_helper)" 2>/dev/null || true
     fi

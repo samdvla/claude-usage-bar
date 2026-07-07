@@ -57,16 +57,22 @@ def _num(v):
     JSON) encodes int64 fields like billingCycleEnd as *strings* — observed
     live 2026-07-06 — so numeric strings must be accepted too. Non-finite
     results (inf/nan, e.g. an absurd "1e400" string) are rejected so
-    downstream int() conversions can never raise."""
+    downstream int() conversions can never raise. Never raises: both the
+    string->float parse and the int/float->float coercion are guarded —
+    `float()` on a huge JSON integer literal (arbitrary-precision Python
+    int, e.g. a 400-digit number) raises OverflowError, not ValueError."""
     if isinstance(v, bool) or v is None:
         return None
     if isinstance(v, str):
         try:
             v = float(v)
-        except ValueError:
+        except (ValueError, OverflowError):
             return None
     if isinstance(v, (int, float)):
-        f = float(v)
+        try:
+            f = float(v)
+        except (ValueError, OverflowError):
+            return None
         return f if math.isfinite(f) else None
     return None
 
@@ -108,7 +114,7 @@ def _read_cache(cache_path):
     try:
         with open(cache_path, "r") as fh:
             data = json.load(fh)
-        if (isinstance(data, dict) and "record" in data
+        if (isinstance(data, dict) and isinstance(data.get("record"), dict)
                 and isinstance(data.get("fetched_at"), (int, float))
                 and not isinstance(data.get("fetched_at"), bool)):
             return data
@@ -117,20 +123,39 @@ def _read_cache(cache_path):
     return None
 
 
-def _stale_or_error(cached):
-    """Soft-failure result: last cached record marked stale, else error."""
-    if cached is not None:
-        rec = dict(cached["record"])
-        rec["stale"] = True
-        return rec
-    return {"state": "error"}
+def _fail_count(cached):
+    """Sanitized consecutive-failure counter from a cache record: a missing,
+    non-int, bool, or negative value all normalize to 0 (fresh corrupt-proof
+    start rather than propagating garbage)."""
+    n = cached.get("fail_count", 0)
+    if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+        return 0
+    return n
 
 
-def _write_cache(cache_path, now, record):
+def _stale_or_error(cached, cache_path):
+    """Soft-failure result: with a cache present, bump its `fail_count` (kept
+    in the cache file) and serve the stale record while it stays under 3;
+    once it reaches 3, flip to a hard error instead of stale data — the
+    counter keeps incrementing past 3 too, so it stays >=3 (and thus keeps
+    erroring) until a success resets it to 0. No cache at all -> immediate
+    error, nothing to count against."""
+    if cached is None:
+        return {"state": "error"}
+    fail_count = _fail_count(cached) + 1
+    _write_cache(cache_path, cached["fetched_at"], cached["record"], fail_count)
+    if fail_count >= 3:
+        return {"state": "error"}
+    rec = dict(cached["record"])
+    rec["stale"] = True
+    return rec
+
+
+def _write_cache(cache_path, now, record, fail_count=0):
     try:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, "w") as fh:
-            json.dump({"fetched_at": now, "record": record}, fh)
+            json.dump({"fetched_at": now, "record": record, "fail_count": fail_count}, fh)
         os.chmod(cache_path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
         pass
@@ -177,14 +202,14 @@ def cursor_usage(state_db=None, cache_path=None, now=None, urlopen=None, min_int
         if e.code in (401, 403):
             _clear_cache(cache_path)
             return {"state": "expired"}
-        return _stale_or_error(cached)
+        return _stale_or_error(cached, cache_path)
     except Exception:
-        return _stale_or_error(cached)
+        return _stale_or_error(cached, cache_path)
 
     if not isinstance(usage, dict):
         # Valid JSON but not an object (e.g. a list) — treat exactly like a
         # transient network failure: serve stale cache if any, else error.
-        return _stale_or_error(cached)
+        return _stale_or_error(cached, cache_path)
 
     # no_data ONLY when the account is explicitly disabled (`enabled` key
     # present and false) OR planUsage is absent/not-a-dict. A missing

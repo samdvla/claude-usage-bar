@@ -301,6 +301,100 @@ def test_list_response_stale_with_cache(tmp_path):
     assert rec["stale"] is True
 
 
+def test_consecutive_failures_flip_to_error(tmp_path):
+    """Spec: each network/shape failure with a cache present bumps a
+    `fail_count` kept in the cache FILE and still serves stale data while
+    it's under 3; the 3rd consecutive failure flips to a hard error instead
+    (counter keeps climbing past 3 too); a subsequent success resets it to 0
+    and rewrites the cache."""
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache_path = tmp_path / "cache.json"
+    seeded = {"fetched_at": NOW - 1000, "record": {
+        "state": "ok", "u5": 0.3, "u7": None, "r5": NOW + 5000, "r7": None,
+        "plan": "Pro", "as_of": NOW - 1000,
+    }}
+    cache_path.write_text(json.dumps(seeded))
+
+    bad_urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": urllib.error.URLError("boom"),
+        "GetPlanInfo": {"planInfo": {"planName": "pro"}},
+    })
+
+    rec1 = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW, urlopen=bad_urlopen)
+    assert rec1["state"] == "ok" and rec1["stale"] is True
+    assert json.loads(cache_path.read_text())["fail_count"] == 1
+
+    rec2 = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW + 400, urlopen=bad_urlopen)
+    assert rec2["state"] == "ok" and rec2["stale"] is True
+    assert json.loads(cache_path.read_text())["fail_count"] == 2
+
+    rec3 = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW + 800, urlopen=bad_urlopen)
+    assert rec3 == {"state": "error"}
+    assert json.loads(cache_path.read_text())["fail_count"] == 3
+
+    rec4 = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW + 1200, urlopen=bad_urlopen)
+    assert rec4 == {"state": "error"}  # stays in error, counter keeps climbing
+    assert json.loads(cache_path.read_text())["fail_count"] == 4
+
+    good_urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": {
+            "enabled": True,
+            "planUsage": {"limit": 2000, "totalSpend": 900, "totalPercentUsed": 45.0},
+            "billingCycleEnd": 1782600000000,
+        },
+        "GetPlanInfo": {"planInfo": {"planName": "pro"}},
+    })
+    rec5 = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW + 1600, urlopen=good_urlopen)
+    assert rec5["state"] == "ok"
+    assert json.loads(cache_path.read_text())["fail_count"] == 0
+
+
+def test_corrupt_record_cache_ignored(tmp_path):
+    """A cache file whose 'record' value isn't a dict (corrupted/foreign
+    write) is treated as NO cache at all, not merely an empty stale answer —
+    so a failure with nothing valid to fall back on is a hard error."""
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache_path = tmp_path / "cache.json"
+    cache_path.write_text(json.dumps({"fetched_at": NOW - 1000, "record": "not-a-dict"}))
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": urllib.error.URLError("boom"),
+        "GetPlanInfo": {"planInfo": {"planName": "pro"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW, urlopen=urlopen)
+    assert rec == {"state": "error"}
+
+
+def test_num_never_raises_on_huge_int_literal():
+    """A >308-digit int (arbitrary-precision Python int from json.loads of a
+    huge JSON integer literal) overflows float() with OverflowError, not
+    ValueError — _num must swallow that too, per its never-raise docstring."""
+    m = _load()
+    assert m._num(int("9" * 400)) is None
+
+
+def test_huge_billing_cycle_end_field_none_state_ok(tmp_path):
+    """End-to-end: a billingCycleEnd this large must not crash cursor_usage —
+    r5 becomes None while the rest of the record stays state 'ok'."""
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache = str(tmp_path / "cache.json")
+    huge = int("9" * 400)
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": {
+            "enabled": True,
+            "planUsage": {"totalPercentUsed": 10.0},
+            "billingCycleEnd": huge,
+        },
+        "GetPlanInfo": {"planInfo": {"planName": "Free"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=cache, now=NOW, urlopen=urlopen)
+    assert rec["state"] == "ok"
+    assert rec["r5"] is None
+    assert rec["u5"] == 0.1
+
+
 def test_nonfinite_cycle_end_and_string_percent(tmp_path):
     """billingCycleEnd overflowing float ("1e400" → inf) must not crash — r5
     becomes None; totalPercentUsed as a STRING pins _num on the percent path."""

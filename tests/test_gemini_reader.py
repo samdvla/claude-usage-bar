@@ -83,7 +83,8 @@ def test_happy_count_two_projects_and_subagent(tmp_path):
     assert rec["state"] == "ok"
     assert rec["count"] == 5  # g1..g5; rewind control line does NOT reduce it
     assert rec["estimated"] is True
-    assert rec["u7"] is None and rec["r7"] is None and rec["plan"] is None
+    assert rec["u7"] is None and rec["r7"] is None
+    assert rec["plan"] == "Free"  # default cap (1000) maps to the Free tier label
     assert rec["as_of"] is None
 
     expected_midnight = datetime.fromtimestamp(NOW, PT).replace(
@@ -184,6 +185,19 @@ def test_cap_below_one_defaults_to_1000(tmp_path):
     rec = m.gemini_usage(root=root, cap=0, now=NOW)
     assert rec["cap"] == 1000
     assert rec["u5"] == 0.25
+
+
+def test_plan_label_from_cap(tmp_path):
+    """Spec §4: the cap (Settings ▸ Gemini plan picker) maps to a tier label
+    so the dropdown header can show "Gemini · Free" etc. An unrecognized cap
+    (a stray custom value) falls back to no label rather than guessing."""
+    m = _load()
+    root = _mkroot(tmp_path, [("tmp/hash1/chats/session.jsonl", [])])
+    expected = {250: "API key", 1000: "Free", 1500: "AI Pro", 2000: "AI Ultra"}
+    for cap, label in expected.items():
+        rec = m.gemini_usage(root=root, cap=cap, now=NOW)
+        assert rec["plan"] == label, f"cap={cap}"
+    assert m.gemini_usage(root=root, cap=777, now=NOW)["plan"] is None
 
 
 def test_mtime_filter_excludes_stale_file(tmp_path):
