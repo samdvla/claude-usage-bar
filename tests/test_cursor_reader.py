@@ -45,7 +45,8 @@ class _Resp:
         return False
 
 
-def _fake_urlopen(by_suffix, counter=None, count_suffix="GetCurrentPeriodUsage"):
+def _fake_urlopen(by_suffix, counter=None, count_suffix="GetCurrentPeriodUsage",
+                  check=None):
     """Builds a urlopen(req, timeout=...) fake keyed by URL suffix.
 
     by_suffix: {"GetCurrentPeriodUsage": {...}, "GetPlanInfo": {...}}
@@ -54,9 +55,12 @@ def _fake_urlopen(by_suffix, counter=None, count_suffix="GetCurrentPeriodUsage")
     the primary (GetCurrentPeriodUsage) call — since one cursor_usage() call
     that reaches the network makes two HTTP requests (usage + plan) but
     should count as a single "hit the network" event for cache tests.
+    `check`, if given, is called with every Request for contract assertions.
     """
     def _urlopen(req, timeout=None):
         url = req.full_url if hasattr(req, "full_url") else req.get_full_url()
+        if check is not None:
+            check(req)
         if counter is not None and url.endswith(count_suffix):
             counter[0] += 1
         for suffix, payload in by_suffix.items():
@@ -72,6 +76,16 @@ def test_happy_path(tmp_path):
     m = _load()
     db = _mkdb(tmp_path)
     cache = str(tmp_path / "cache.json")
+
+    def _check_contract(req):
+        # urllib capitalizes stored header keys: "Connect-Protocol-Version"
+        # → "Connect-protocol-version" (verified empirically).
+        assert req.get_header("Connect-protocol-version") == "1"
+        assert req.get_header("Authorization").startswith("Bearer ")
+        assert req.get_header("Content-type") == "application/json"
+        assert req.data == b"{}"
+        assert req.get_method() == "POST"
+
     urlopen = _fake_urlopen({
         "GetCurrentPeriodUsage": {
             "enabled": True,
@@ -80,7 +94,7 @@ def test_happy_path(tmp_path):
             "billingCycleEnd": 1782600000000,
         },
         "GetPlanInfo": {"planInfo": {"planName": "pro"}},
-    })
+    }, check=_check_contract)
     rec = m.cursor_usage(state_db=db, cache_path=cache, now=NOW, urlopen=urlopen)
     assert rec["u5"] == 0.45
     assert rec["r5"] == 1782600000
@@ -235,3 +249,56 @@ def test_network_error_keeps_cache(tmp_path):
     assert rec["state"] == "ok"
     assert rec["u5"] == 0.3
     assert rec["stale"] is True
+
+
+def test_list_response_error_without_cache(tmp_path):
+    """Valid JSON but not an object (a list) → error when no cache exists."""
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache = str(tmp_path / "cache.json")
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": [1, 2, 3],
+        "GetPlanInfo": {"planInfo": {"planName": "pro"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=cache, now=NOW, urlopen=urlopen)
+    assert rec == {"state": "error"}
+
+
+def test_list_response_stale_with_cache(tmp_path):
+    """Valid JSON but not an object → stale cached record when cache exists."""
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache_path = tmp_path / "cache.json"
+    seeded = {"fetched_at": NOW - 1000, "record": {
+        "state": "ok", "u5": 0.3, "u7": None, "r5": NOW + 5000, "r7": None,
+        "plan": "Pro", "as_of": NOW - 1000,
+    }}
+    cache_path.write_text(json.dumps(seeded))
+
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": [1, 2, 3],
+        "GetPlanInfo": {"planInfo": {"planName": "pro"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=str(cache_path), now=NOW, urlopen=urlopen)
+    assert rec["state"] == "ok"
+    assert rec["u5"] == 0.3
+    assert rec["stale"] is True
+
+
+def test_nonfinite_cycle_end_and_string_percent(tmp_path):
+    """billingCycleEnd overflowing float ("1e400" → inf) must not crash — r5
+    becomes None; totalPercentUsed as a STRING pins _num on the percent path."""
+    m = _load()
+    db = _mkdb(tmp_path)
+    cache = str(tmp_path / "cache.json")
+    urlopen = _fake_urlopen({
+        "GetCurrentPeriodUsage": {
+            "planUsage": {"totalPercentUsed": "45.0"},
+            "billingCycleEnd": "1e400",
+        },
+        "GetPlanInfo": {"planInfo": {"planName": "Free"}},
+    })
+    rec = m.cursor_usage(state_db=db, cache_path=cache, now=NOW, urlopen=urlopen)
+    assert rec["state"] == "ok"
+    assert rec["u5"] == 0.45
+    assert rec["r5"] is None
